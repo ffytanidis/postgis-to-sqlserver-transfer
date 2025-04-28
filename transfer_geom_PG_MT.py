@@ -35,7 +35,19 @@ pg_engine = create_engine(pg_url)
 sql_conn = pyodbc.connect(sql_server_conn_str)
 sql_cur = sql_conn.cursor()
 
-def fix_field_char_limit(target_field, value):
+#Fix target value (character limit, mappings)
+def fix_target_value(target_field, value):
+    # Ports mapping
+    PORT_TYPE_MAPPING = {
+        'Port': 'P',
+        'Marina': 'M',
+        'Anchorage': 'A',
+        'Offshore Terminal': 'T'
+    }
+    if target_field == 'PORT_TYPE':
+        value = PORT_TYPE_MAPPING.get(value, None)  # Default to 'P' if not found
+
+    ## The solution is temporary
     # set max field lenths
     MAX_FIELD_LENGTHS = {
         'PORT_NAME': 20
@@ -44,22 +56,13 @@ def fix_field_char_limit(target_field, value):
     if target_field in MAX_FIELD_LENGTHS and isinstance(value, str):
         max_len = MAX_FIELD_LENGTHS[target_field]
         value = value[:max_len] if value else value
+
     return value
-
-def fix_target_field_mapping(target_field, value):
-    TYPE_MAPPING = {
-        'Port': 'P',
-        'Marina': 'M',
-        'Anchorage': 'A',
-        'Offshore Terminal': 'T'
-    }
-
 # --- Helper Function to Upload a GeoDataFrame ---
 def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table):
     """
     Upload a GeoDataFrame into SQL Server, mapping fields correctly.
     """
-
 
     print ("updating ports...")
     insert_sql = f"""
@@ -71,7 +74,7 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table):
         for idx, row in gdf.iterrows():
             values = []
             for source_field, target_field in mapping_fields.items():
-                value = fix_field_char_limit(target_field,row[source_field])
+                value = fix_target_value(target_field,row[source_field])
                 # Convert geometry to WKT
                 if isinstance(value, (BaseGeometry, object)) and source_field.lower().endswith('geom'):
                     value = value.wkt if value else None
