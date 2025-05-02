@@ -9,7 +9,7 @@ import geopandas as gpd
 import traceback, logging
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
-
+import math
 # Load environment variables from .env
 load_dotenv()
 
@@ -64,6 +64,10 @@ def fix_target_value(target_field, value):
     if isinstance(value, list):
         value = value[0] if value else None
 
+    # Convert NaN to None
+    if isinstance(value, float) and math.isnan(value):
+        return None
+
     # Handle cases Arithmetic overflow error for data type smallint
     SMALLINT_MAX = 32767
     if target_field in {'RELATED_ANCH_ID', 'RELATED_PORT_ID'}:
@@ -72,11 +76,6 @@ def fix_target_value(target_field, value):
                 f"SMALLINT overflow: {target_field} value {value} exceeds range. Replacing with NULL."
             )
             return None
-
-
-
-
-
     return value
 
 # Ensure correct ring orientation for polygons and multipolygons
@@ -130,7 +129,9 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
             #print(f"Preparing to insert into {target_table}: {dict(zip(mapping_fields.values(), values))}")
             try:
                 sql_cur.execute(insert_sql, *values)
+                sql_conn.commit()
             except Exception as row_error:
+                print ("values: ",values)
                 failed_rows += 1
                 # Get zone_id
                 zone_id_value = row['zone_id']
@@ -200,7 +201,7 @@ def update_ports():
 
         # Define mapping: source field -> target SQL Server field
         port_mapping_fields = {
-            'zone_id': 'shelter',#to keep track of zone_id, help field
+            #'zone_id': 'shelter'
             'mt_id': 'PORT_ID',
             'name': 'PORT_NAME',
             'zone_type': 'PORT_TYPE',
@@ -231,6 +232,8 @@ def update_ports():
                 target_table="dbo.PORTS",
                 use_identity_insert=True
             )
+        #double check
+        sql_conn.commit()
 
         # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
         no_id_mapping = port_mapping_fields.copy()
