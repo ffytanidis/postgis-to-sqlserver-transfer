@@ -132,6 +132,7 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
                 sql_conn.commit()
             except Exception as row_error:
                 print ("values: ",values)
+                logging.error(values)
                 failed_rows += 1
                 # Get zone_id
                 zone_id_value = row['zone_id']
@@ -144,7 +145,7 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
                 continue  # Skip this bad row and continue
 
         if use_identity_insert:
-            print(f"\U0001F512 SET IDENTITY_INSERT {target_table} OFF")
+            print(f" SET IDENTITY_INSERT {target_table} OFF")
             sql_cur.execute(f"SET IDENTITY_INSERT {target_table} OFF;")
         # Commit changes
         sql_conn.commit()
@@ -181,8 +182,8 @@ def update_ports():
         related_zone_port_id,
         polygon_geom
     FROM sandbox.mview_master_ports
+    --limit 100
     """
-
     try:
         print("read_postgis...")
         gdf = gpd.read_postgis(
@@ -255,46 +256,91 @@ def update_ports():
 # --- Function to Update Berths ---
 def update_berths():
     print("Starting to update BERTHS...")
-
+    #sql query to get Ports
     pg_Berth_query = """
     SELECT 
         zone_id,
-        stndrd_zone_name AS name,
-        zone_sub_type AS berth_type,
-        related_zone_port_id,
-        related_zone_term_id,
-        "CENTERX",
-        "CENTERY",
+        mt_id,
+        name,
+        zone_type,
+        terminal_id,
+        port_id,
+        MAX_LENGTH,
+        MAX_DRAUGHT,
+        MAX_BREADTH,
+        LIFTING_GEAR,
+        BULK_CAPACITY,
+        DESCRIPTION,
+        MAX_TIDAL_DRAUGHT,
         polygon_geom
-    FROM sandbox.mview_master_berths
+    FROM sandbox.mview_master_ports
+    limit 100
     """
-
     try:
+        print("read_postgis...")
         gdf = gpd.read_postgis(
             sql=pg_Berth_query,
             con=pg_engine,
             geom_col='polygon_geom'
         )
-        print(f"Berths GeoDataFrame loaded, {len(gdf)} records.")
+        # Check for ring orientation issues SQL server requires : outer ring - anticclockwise & inner ring-clockwise
+        gdf['polygon_geom'] = gdf['polygon_geom'].apply(lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
+        print(f"Βερτησ GeoDataFrame loaded and checked: {len(gdf)} records.")
 
+        # Optional: set CRS if missing
         if gdf.crs is None:
             gdf.set_crs(epsg=4326, inplace=True)
+        print ("gdf.crs: ",gdf.crs)
 
-        berth_mapping_fields = {
-            'zone_id': 'BERTH_ID',
-            'name': 'BERTH_NAME',
-            'berth_type': 'BERTH_TYPE',
-            'related_zone_port_id': 'PORT_ID',
-            'related_zone_term_id': 'TERMINAL_ID',
-            "CENTERX": 'CENTERX',
-            "CENTERY": 'CENTERY',
+        # Define mapping: source field -> target SQL Server field
+        port_mapping_fields = {
+            'zone_id':'',
+            'mt_id':'',
+            'name':'',
+            'zone_type':'',
+            'terminal_id':'',
+            'port_id':'',
+            'MAX_LENGTH':'',
+            'MAX_DRAUGHT':'',
+            'MAX_BREADTH':'',
+            'LIFTING_GEAR':'',
+            'BULK_CAPACITY':'',
+            'DESCRIPTION':'',
+            'MAX_TIDAL_DRAUGHT':'',
             'polygon_geom': 'POLYGON'
         }
 
-        upload_gdf_to_sqlserver(gdf, berth_mapping_fields, target_table="dbo.BERTHS")
+        # Split dataset
+        gdf_with_id = gdf[gdf['mt_id'].notnull()].copy() #when mt_id is not null, match
+        gdf_without_id = gdf[gdf['mt_id'].isnull()].copy() #when mt_id is null, no match
+
+        # Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
+        if not gdf_with_id.empty:
+            upload_gdf_to_sqlserver(
+                gdf=gdf_with_id,
+                mapping_fields=port_mapping_fields,
+                target_table="dbo.PORTS",
+                use_identity_insert=True
+            )
+        #double check
+        sql_conn.commit()
+
+        # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
+        no_id_mapping = port_mapping_fields.copy()
+        del no_id_mapping['mt_id']
+
+        if not gdf_without_id.empty:
+            print (len(gdf_without_id), "records without mt_id are about to insert.")
+            upload_gdf_to_sqlserver(
+                gdf=gdf_without_id,
+                mapping_fields=no_id_mapping,
+                target_table="dbo.PORTS",
+                use_identity_insert=False
+            )
 
     except Exception as e:
-        print(f"Error in update_berths(): {str(e)}")
+        print(f"Error in update_ports(): {str(e)}")
+        traceback.print_exc()
 
 # --- Function to Update Terminals ---
 def update_terminals():
