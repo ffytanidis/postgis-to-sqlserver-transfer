@@ -53,7 +53,8 @@ def fix_target_value(target_field, value):
     ## The solution is temporary
     # set max field lenths
     MAX_FIELD_LENGTHS = {
-        'PORT_NAME': 20
+        'PORT_NAME': 20,
+        'BERTH_NAME': 30
     }
     # check if value exceeds limit - Temporary solution
     if target_field in MAX_FIELD_LENGTHS and isinstance(value, str):
@@ -261,20 +262,21 @@ def update_berths():
     SELECT 
         zone_id,
         mt_id,
+        mt_port_id,
         name,
         zone_type,
         terminal_id,
         port_id,
-        MAX_LENGTH,
-        MAX_DRAUGHT,
-        MAX_BREADTH,
-        LIFTING_GEAR,
-        BULK_CAPACITY,
-        DESCRIPTION,
-        MAX_TIDAL_DRAUGHT,
+        "MAX_LENGTH",
+        "MAX_DRAUGHT",
+        "MAX_BREADTH",
+        "LIFTING_GEAR",
+        "BULK_CAPACITY",
+        "DESCRIPTION",
+        "MAX_TIDAL_DRAUGHT",
         polygon_geom
-    FROM sandbox.mview_master_ports
-    limit 100
+    FROM sandbox.mview_master_berths
+
     """
     try:
         print("read_postgis...")
@@ -285,7 +287,7 @@ def update_berths():
         )
         # Check for ring orientation issues SQL server requires : outer ring - anticclockwise & inner ring-clockwise
         gdf['polygon_geom'] = gdf['polygon_geom'].apply(lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
-        print(f"Βερτησ GeoDataFrame loaded and checked: {len(gdf)} records.")
+        print(f"Berths GeoDataFrame loaded and checked: {len(gdf)} records.")
 
         # Optional: set CRS if missing
         if gdf.crs is None:
@@ -294,19 +296,19 @@ def update_berths():
 
         # Define mapping: source field -> target SQL Server field
         port_mapping_fields = {
-            'zone_id':'',
-            'mt_id':'',
-            'name':'',
-            'zone_type':'',
-            'terminal_id':'',
-            'port_id':'',
-            'MAX_LENGTH':'',
-            'MAX_DRAUGHT':'',
-            'MAX_BREADTH':'',
-            'LIFTING_GEAR':'',
-            'BULK_CAPACITY':'',
-            'DESCRIPTION':'',
-            'MAX_TIDAL_DRAUGHT':'',
+            #'zone_id':'',
+            'mt_id':'BERTH_ID',
+            'name':'BERTH_NAME',#30 char limit
+            #'zone_type':'',
+            'terminal_id':'TERMINAL_ID',
+            'mt_port_id':'PORT_ID',
+            'MAX_LENGTH':'MAX_LENGTH',
+            'MAX_DRAUGHT':'MAX_DRAUGHT',
+            'MAX_BREADTH':'MAX_BREADTH',
+            'LIFTING_GEAR':'LIFTING_GEAR',
+            'BULK_CAPACITY':'BULK_CAPACITY',
+            'DESCRIPTION':'DESCRIPTION',
+            'MAX_TIDAL_DRAUGHT':'MAX_TIDAL_DRAUGHT',
             'polygon_geom': 'POLYGON'
         }
 
@@ -319,7 +321,7 @@ def update_berths():
             upload_gdf_to_sqlserver(
                 gdf=gdf_with_id,
                 mapping_fields=port_mapping_fields,
-                target_table="dbo.PORTS",
+                target_table="dbo.PORT_BERTHS",
                 use_identity_insert=True
             )
         #double check
@@ -334,12 +336,12 @@ def update_berths():
             upload_gdf_to_sqlserver(
                 gdf=gdf_without_id,
                 mapping_fields=no_id_mapping,
-                target_table="dbo.PORTS",
+                target_table="dbo.PORT_BERTHS",
                 use_identity_insert=False
             )
 
     except Exception as e:
-        print(f"Error in update_ports(): {str(e)}")
+        print(f"Error in update_berths(): {str(e)}")
         traceback.print_exc()
 
 # --- Function to Update Terminals ---
@@ -385,8 +387,8 @@ def update_terminals():
 # --- MAIN ---
 if __name__ == "__main__":
     try:
-        update_ports()
-        #update_berths()
+        #update_ports()
+        update_berths()
         #update_terminals()
     finally:
         sql_cur.close()
