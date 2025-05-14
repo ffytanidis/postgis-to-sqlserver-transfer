@@ -55,7 +55,8 @@ def fix_target_value(target_field, value):
     # set max field lenths
     MAX_FIELD_LENGTHS = {
         'PORT_NAME': 20,
-        'BERTH_NAME': 30
+        'BERTH_NAME': 30,
+        'TERMINAL_NAME' : 50
     }
     # check if value exceeds limit - Temporary solution
     if target_field in MAX_FIELD_LENGTHS and isinstance(value, str):
@@ -89,7 +90,6 @@ def correct_orientation(geom):
     else:
         return geom
 
-
 # Global dictionary to hold mapping of source zone_id to new SQL Server-assigned PORT_ID
 zoneid_to_new_portid = {}
 
@@ -106,8 +106,9 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
     print(f"Updating {target_table}...")
     insert_sql = f"""
     INSERT INTO {target_table} ({', '.join(mapping_fields.values())})
-    OUTPUT INSERTED.BERTH_ID
-    VALUES ({', '.join(['?'] * len(mapping_fields))})
+    --OUTPUT INSERTED.PORT_ID
+    VALUES ({', '.join(['?'] * len(mapping_fields))});
+    SELECT SCOPE_IDENTITY();
     """
     #Set counter
     failed_rows = 0
@@ -135,6 +136,13 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
             try:
                 sql_cur.execute(insert_sql, *values)
                 if return_identity_mapping  and not use_identity_insert:
+                    #try to get the ID of the inserted record by matching the polygons
+                    sql_cur.execute(f"""
+                        SELECT port_id
+                        FROM {target_table}
+                        WHERE POLYGON.STEquals(geography::STGeomFromText(?, 4326)) = 1
+                        ORDER BY port_id DESC
+                    """, (values[-1],))  # assuming geometry is the last field
                     new_id = sql_cur.fetchone()[0]
                     zone_id = row['zone_id']
                     identity_mapping[zone_id] = new_id
@@ -301,7 +309,6 @@ def update_berths():
         "MAX_TIDAL_DRAUGHT",
         polygon_geom
     FROM sandbox.mview_master_berths
-
     """
     try:
         print("read_postgis...")
@@ -321,6 +328,18 @@ def update_berths():
         print ("gdf.crs: ",gdf.crs)
 
         # Assign the new PORT_ID given by the system for cases when Ports in PG and MT are not matched
+
+        #### Bypassing mapping dict START ###
+        ##Bypassing the dynamic creation of the global dict and read from local file
+        import csv
+        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                zone_id = int(row['zone_id'])
+                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                zoneid_to_new_portid[zone_id] = new_port_id
+        #### Bypassing mapping dict END ###
+
         before_nulls = gdf['mt_port_id'].isna().sum()
         print(f"Null mt_port_id before mapping: {before_nulls}")
         logging.info(f"Null mt_port_id before mapping: {before_nulls}")
@@ -334,7 +353,7 @@ def update_berths():
         logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         # Define mapping: source field -> target SQL Server field
-        port_mapping_fields = {
+        berth_mapping_fields = {
             #'zone_id':'',
             'mt_id':'BERTH_ID',
             'name':'BERTH_NAME',#30 char limit
@@ -361,7 +380,7 @@ def update_berths():
             logging.info(f"{len(gdf_without_id)} records with mt_id are about to insert.")
             upload_gdf_to_sqlserver(
                 gdf=gdf_with_id,
-                mapping_fields=port_mapping_fields,
+                mapping_fields=berth_mapping_fields,
                 target_table="dbo.PORT_BERTHS",
                 use_identity_insert=True
             )
@@ -369,7 +388,7 @@ def update_berths():
         #sql_conn.commit()
 
         # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
-        no_id_mapping = port_mapping_fields.copy()
+        no_id_mapping = berth_mapping_fields.copy()
         del no_id_mapping['mt_id']
 
         if not gdf_without_id.empty:
@@ -390,8 +409,8 @@ def update_berths():
 
 # --- Function to Update Terminals ---
 def update_terminals():
-    print("Starting to update TERMINALS...")
-    logging.info("Starting to update TERMINALS...")
+    print("Starting to update Terminals...")
+    logging.info("Starting to update Terminals...")
     # sql query to get Ports
     pg_Terminal_query = """
         SELECT 
@@ -400,23 +419,23 @@ def update_terminals():
             mt_port_id,
             name,
             zone_type,
-            terminal_id,
             port_id,
-            "MAX_LENGTH",
-            "MAX_DRAUGHT",
-            "MAX_BREADTH",
-            "LIFTING_GEAR",
-            "BULK_CAPACITY",
-            "DESCRIPTION",
-            "MAX_TIDAL_DRAUGHT",
+            facility_name,
+            company_name,
+            smdg_name,
+            smdg_listing_date,
+            smdg_unlisting_date,
+            smdg_updated_date,
+            terminal_website,
+            terminal_address,
+            additional_terminal_info,
             polygon_geom
-        FROM sandbox.mview_master_berths
-
+        FROM sandbox.mview_master_terminals
         """
     try:
         print("read_postgis...")
         gdf = gpd.read_postgis(
-            sql=pg_Berth_query,
+            sql=pg_Terminal_query,
             con=pg_engine,
             geom_col='polygon_geom'
         )
@@ -432,6 +451,18 @@ def update_terminals():
         print("gdf.crs: ", gdf.crs)
 
         # Assign the new PORT_ID given by the system for cases when Ports in PG and MT are not matched
+
+        #### Bypassing mapping dict START ###
+        ##Bypassing the dynamic creation of the global dict and read from local file
+        import csv
+        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                zone_id = int(row['zone_id'])
+                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                zoneid_to_new_portid[zone_id] = new_port_id
+        #### Bypassing mapping dict END ###
+
         before_nulls = gdf['mt_port_id'].isna().sum()
         print(f"Null mt_port_id before mapping: {before_nulls}")
         logging.info(f"Null mt_port_id before mapping: {before_nulls}")
@@ -445,26 +476,27 @@ def update_terminals():
         logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         # Define mapping: source field -> target SQL Server field
-        port_mapping_fields = {
+        terminal_mapping_fields = {
             # 'zone_id':'',
-            'mt_id': 'BERTH_ID',
-            'name': 'BERTH_NAME',  # 30 char limit
-            # 'zone_type':'',
-            'terminal_id': 'TERMINAL_ID',
+            'mt_id': 'TERMINAL_ID',
+            'name': 'TERMINAL_NAME',  # 50 char limit
             'mt_port_id': 'PORT_ID',
-            'MAX_LENGTH': 'MAX_LENGTH',
-            'MAX_DRAUGHT': 'MAX_DRAUGHT',
-            'MAX_BREADTH': 'MAX_BREADTH',
-            'LIFTING_GEAR': 'LIFTING_GEAR',
-            'BULK_CAPACITY': 'BULK_CAPACITY',
-            'DESCRIPTION': 'DESCRIPTION',
-            'MAX_TIDAL_DRAUGHT': 'MAX_TIDAL_DRAUGHT',
-            'polygon_geom': 'POLYGON'
         }
 
+        # Create subset of the gdf based on field mapping for different tables
+        def create_df_subset(df, field_mapping):
+            subset_columns = list(field_mapping.keys())
+            gdf_subset = df[subset_columns]
+            # Step 2: Drop duplicates
+            gdf_unique = gdf_subset.drop_duplicates()
+            return gdf_unique
+
+        #GDf for Port_Terminals table
+        terminals_gdf = create_df_subset(gdf,terminal_mapping_fields)
+
         # Split dataset
-        gdf_with_id = gdf[gdf['mt_id'].notnull()].copy()  # when mt_id is not null, match
-        gdf_without_id = gdf[gdf['mt_id'].isnull()].copy()  # when mt_id is null, no match
+        gdf_with_id = terminals_gdf[terminals_gdf['mt_id'].notnull()].copy()  # when mt_id is not null, match
+        gdf_without_id = terminals_gdf[terminals_gdf['mt_id'].isnull()].copy()  # when mt_id is null, no match
 
         # Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
         if not gdf_with_id.empty:
@@ -472,15 +504,15 @@ def update_terminals():
             logging.info(f"{len(gdf_without_id)} records with mt_id are about to insert.")
             upload_gdf_to_sqlserver(
                 gdf=gdf_with_id,
-                mapping_fields=port_mapping_fields,
-                target_table="dbo.PORT_BERTHS",
+                mapping_fields=terminal_mapping_fields,
+                target_table="dbo.PORT_TERMINALS",
                 use_identity_insert=True
             )
         # double check
-        sql_conn.commit()
+        # sql_conn.commit()
 
         # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
-        no_id_mapping = port_mapping_fields.copy()
+        no_id_mapping = terminal_mapping_fields.copy()
         del no_id_mapping['mt_id']
 
         if not gdf_without_id.empty:
@@ -489,8 +521,9 @@ def update_terminals():
             upload_gdf_to_sqlserver(
                 gdf=gdf_without_id,
                 mapping_fields=no_id_mapping,
-                target_table="dbo.PORT_BERTHS",
-                use_identity_insert=False
+                target_table="dbo.PORT_TERMINALS",
+                use_identity_insert=False,
+                return_identity_mapping=False
             )
 
     except Exception as e:
@@ -503,8 +536,8 @@ def update_terminals():
 if __name__ == "__main__":
     try:
         #update_ports()
-        update_berths()
-        #update_terminals()
+        #update_berths()
+        update_terminals()
     finally:
         sql_cur.close()
         sql_conn.close()
