@@ -101,6 +101,18 @@ logging.basicConfig(
     format='%(asctime)s [%(levelname)s] %(message)s'
 )
 
+# Create subset of the gdf based on field mapping for different tables
+def create_df_subset(df, field_mapping):
+    subset_columns = list(field_mapping.keys())
+    #Add also zone_id to be used for the  mapping csv file generation
+    if 'zone_id' not in subset_columns:
+        subset_columns.append('zone_id')
+    gdf_subset = df[subset_columns]
+    # Step 2: Drop duplicates
+    gdf_unique = gdf_subset.drop_duplicates()
+    return gdf_unique
+
+
 # --- Helper Function to Upload a GeoDataFrame ---
 def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_insert=False, return_identity_mapping=False):
     print(f"Updating {target_table}...")
@@ -136,13 +148,20 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
             try:
                 sql_cur.execute(insert_sql, *values)
                 if return_identity_mapping  and not use_identity_insert:
-                    #try to get the ID of the inserted record by matching the polygons
-                    sql_cur.execute(f"""
-                        SELECT port_id
-                        FROM {target_table}
-                        WHERE POLYGON.STEquals(geography::STGeomFromText(?, 4326)) = 1
-                        ORDER BY port_id DESC
-                    """, (values[-1],))  # assuming geometry is the last field
+                    if target_table == 'dbo.PORTS':
+                        #PORTS-try to get the ID of the inserted record by matching the polygons
+                        sql_cur.execute(f"""
+                            SELECT port_id
+                            FROM {target_table}
+                            WHERE POLYGON.STEquals(geography::STGeomFromText(?, 4326)) = 1
+                            ORDER BY port_id DESC
+                        """, (values[-1],))  # assuming geometry is the last field
+                    elif target_table == 'dbo.PORT_TERMINALS':
+                        #TERMINALS-TRY TO GET THE id OF THE INSERTED RECORD BY MATCHING NAME & port_id
+                        sql = f"""SELECT terminal_id FROM {target_table} WHERE TERMINAL_NAME = '{values[0]}' AND PORT_ID = {int(values[1])}
+                        """
+                        #print (sql)
+                        sql_cur.execute(sql)
                     new_id = sql_cur.fetchone()[0]
                     zone_id = row['zone_id']
                     identity_mapping[zone_id] = new_id
@@ -279,7 +298,7 @@ def update_ports():
         pd.DataFrame.from_dict(zoneid_to_new_portid, orient='index', columns=['new_port_id']) \
             .rename_axis('zone_id') \
             .reset_index() \
-            .to_csv("zoneid_to_new_portid_mapping.csv", index=False)
+            .to_csv(f"zoneid_to_new_portid_mapping_PORTS.csv", index=False)
 
     except Exception as e:
         print(f"Error in update_ports(): {str(e)}")
@@ -442,8 +461,8 @@ def update_terminals():
         # Check for ring orientation issues SQL server requires : outer ring - anti clockwise & inner ring-clockwise
         gdf['polygon_geom'] = gdf['polygon_geom'].apply(
             lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
-        print(f"Berths GeoDataFrame loaded and checked: {len(gdf)} records.")
-        logging.info(f"Berths GeoDataFrame loaded and checked: {len(gdf)} records.")
+        print(f"Terminal GeoDataFrame loaded and checked: {len(gdf)} records.")
+        logging.info(f"Terminal GeoDataFrame loaded and checked: {len(gdf)} records.")
 
         # Optional: set CRS if missing
         if gdf.crs is None:
@@ -483,15 +502,7 @@ def update_terminals():
             'mt_port_id': 'PORT_ID',
         }
 
-        # Create subset of the gdf based on field mapping for different tables
-        def create_df_subset(df, field_mapping):
-            subset_columns = list(field_mapping.keys())
-            gdf_subset = df[subset_columns]
-            # Step 2: Drop duplicates
-            gdf_unique = gdf_subset.drop_duplicates()
-            return gdf_unique
-
-        #GDf for Port_Terminals table
+        #Create subset for Port_Terminals table
         terminals_gdf = create_df_subset(gdf,terminal_mapping_fields)
 
         # Split dataset
@@ -500,8 +511,8 @@ def update_terminals():
 
         # Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
         if not gdf_with_id.empty:
-            print(len(gdf_without_id), "records with mt_id are about to insert.")
-            logging.info(f"{len(gdf_without_id)} records with mt_id are about to insert.")
+            print(len(gdf_with_id), "records with mt_id are about to insert.")
+            logging.info(f"{len(gdf_with_id)} records with mt_id are about to insert.")
             upload_gdf_to_sqlserver(
                 gdf=gdf_with_id,
                 mapping_fields=terminal_mapping_fields,
@@ -518,17 +529,24 @@ def update_terminals():
         if not gdf_without_id.empty:
             print(len(gdf_without_id), "records without mt_id are about to insert.")
             logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
-            upload_gdf_to_sqlserver(
+            mapping = upload_gdf_to_sqlserver(
                 gdf=gdf_without_id,
                 mapping_fields=no_id_mapping,
                 target_table="dbo.PORT_TERMINALS",
                 use_identity_insert=False,
-                return_identity_mapping=False
+                return_identity_mapping=True
             )
-
+        # Store globally the zone_ids : new assigned MT ids by the system
+        zoneid_to_new_portid.update(mapping)
+        print ("zoneid_to_new_portid:",zoneid_to_new_portid)
+        #save it locally in CSV file
+        pd.DataFrame.from_dict(zoneid_to_new_portid, orient='index', columns=['new_port_id']) \
+            .rename_axis('zone_id') \
+            .reset_index() \
+            .to_csv(f"zoneid_to_new_portid_mapping_TERMINALS.csv", index=False)
     except Exception as e:
-        print(f"Error in update_berths(): {str(e)}")
-        logging.error(f"Error in update_berths(): {str(e)}")
+        print(f"Error in update_terminals(): {str(e)}")
+        logging.error(f"Error in update_terminals(): {str(e)}")
         traceback.print_exc()
 
 
