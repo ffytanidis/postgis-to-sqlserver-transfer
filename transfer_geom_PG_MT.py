@@ -90,9 +90,9 @@ def correct_orientation(geom):
     else:
         return geom
 
-# Global dictionary to hold mapping of source zone_id to new SQL Server-assigned PORT_ID
+# Global dictionary to hold mapping of source zone_id to new SQL Server-assigned PORT_ID,TERMINAL_ID
 zoneid_to_new_portid = {}
-
+zoneid_to_new_terminalid = {}
 # Setup error logger
 logging.basicConfig(
     filename='failed_inserts.log',
@@ -107,11 +107,22 @@ def create_df_subset(df, field_mapping):
     #Add also zone_id to be used for the  mapping csv file generation
     if 'zone_id' not in subset_columns:
         subset_columns.append('zone_id')
-    gdf_subset = df[subset_columns]
-    # Step 2: Drop duplicates
-    gdf_unique = gdf_subset.drop_duplicates()
-    return gdf_unique
+    # Detect which columns contain any list-type values
+    list_columns = [col for col in df.columns if df[col].apply(lambda x: isinstance(x, list)).any()]
+    #Covert list to comma delimeted strings
+    for col in list_columns:
+        df[col] = df[col].apply(lambda x: ','.join(map(str, x)) if isinstance(x, list) else x)
+    #Drop Duplicates
+    gdf_unique = df.drop_duplicates()
+    #Covert back to list type
+    for col in list_columns:
+        gdf_unique[col] = gdf_unique[col].apply(
+                lambda x: x.split(',') if isinstance(x, str) and ',' in x else [x] if x else [])
+        gdf_unique[col] = gdf_unique[col].apply(
+            lambda x: [i for i in x.split(',') if i not in ('', 'None', 'null')] if isinstance(x, str) else []
+        )#Remove null values
 
+    return gdf_unique
 
 # --- Helper Function to Upload a GeoDataFrame ---
 def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_insert=False, return_identity_mapping=False):
@@ -164,7 +175,8 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
                         sql_cur.execute(sql)
                     new_id = sql_cur.fetchone()[0]
                     zone_id = row['zone_id']
-                    identity_mapping[zone_id] = new_id
+                    identity_mapping[zone_id] = new_id ##{zone_id:<new_port_id>} / {zone_id:<new_terminal_id>}
+
                 sql_conn.commit()
             except Exception as row_error:
                 print ("Error occurred. Values to insert: ",values)
@@ -189,7 +201,8 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
         if failed_rows > 0:
             print(f"{failed_rows} records failed and were logged.")
         #Return identity mapping if created
-        if return_identity_mapping:
+
+        if identity_mapping:
             return identity_mapping
 
     except Exception as e:
@@ -241,8 +254,8 @@ def update_ports():
         print ("gdf.crs: ",gdf.crs)
 
         # Define mapping: source field -> target SQL Server field
+        #PORTS
         port_mapping_fields = {
-            #'zone_id': 'shelter'
             'mt_id': 'PORT_ID',
             'name': 'PORT_NAME',
             'zone_type': 'PORT_TYPE',
@@ -254,51 +267,69 @@ def update_ports():
             'confirmed': 'CONFIRMED',
             #"CENTERX": 'CENTERX',
             #"CENTERY": 'CENTERY',
-            #'alternative_names': 'ALTERNATIVE_NAMES',
-            #'alternative_unlocodes': 'ALTERNATIVE_UNLOCODES',
             'related_zone_anch_id': 'RELATED_ANCH_ID',
             'related_zone_port_id': 'RELATED_PORT_ID',
             'polygon_geom': 'POLYGON'
         }
+        #R_PORT_ALTNAMES
+        alt_port_name_mapping_fields = {
+            'mt_id': 'PORT_ID',
+            'alternative_names': 'ALTERNATIVE_NAMES',
+            'alternative_unlocodes': 'ALTERNATIVE_UNLOCODES',
+        }
+        def upload_port_data(target_table, field_mapping, gdf):
+            print ("Target table:",target_table)
 
-        # Split dataset
-        gdf_with_id = gdf[gdf['mt_id'].notnull()].copy() #when mt_id is not null, match
-        gdf_without_id = gdf[gdf['mt_id'].isnull()].copy() #when mt_id is null, no match
+            # Split dataset
+            gdf_with_id = gdf[gdf['mt_id'].notnull()].copy() #when mt_id is not null, match
+            gdf_without_id = gdf[gdf['mt_id'].isnull()].copy() #when mt_id is null, no match
 
-        # Insert with explicit ID (IDENTITY_INSERT ON) 'mt_id is not Null'
-        if not gdf_with_id.empty:
-            upload_gdf_to_sqlserver(
-                gdf=gdf_with_id,
-                mapping_fields=port_mapping_fields,
-                target_table="dbo.PORTS",
-                use_identity_insert=True
-            )
-        #double check
-        sql_conn.commit()
+            #A. Insert with explicit ID (IDENTITY_INSERT ON) 'mt_id is not Null'
+            if not gdf_with_id.empty:
+                upload_gdf_to_sqlserver(
+                    gdf=gdf_with_id,
+                    mapping_fields=field_mapping,
+                    target_table=f"dbo.{target_table}",
+                    use_identity_insert=True
+                )
+            #double check
+            sql_conn.commit()
 
-        # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
-        no_id_mapping = port_mapping_fields.copy()
-        del no_id_mapping['mt_id']
+            # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
+            no_id_mapping = field_mapping.copy()
+            del no_id_mapping['mt_id']
 
-        # Insert and let system assign IDs (IDENTITY_INSERT OFF) 'mt_id is Null'
-        if not gdf_without_id.empty:
-            print (len(gdf_without_id), "records without mt_id are about to insert.")
-            logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
-            mapping = upload_gdf_to_sqlserver(
-                gdf=gdf_without_id,
-                mapping_fields=no_id_mapping,
-                target_table="dbo.PORTS",
-                use_identity_insert=False,
-                return_identity_mapping=True
-            )
-        # Store gloabally the zone_ids : new assigned MT ids by the system
-        zoneid_to_new_portid.update(mapping)
-        print ("zoneid_to_new_portid:",zoneid_to_new_portid)
-        #save it locally in CSV file
-        pd.DataFrame.from_dict(zoneid_to_new_portid, orient='index', columns=['new_port_id']) \
-            .rename_axis('zone_id') \
-            .reset_index() \
-            .to_csv(f"zoneid_to_new_portid_mapping_PORTS.csv", index=False)
+            #B. Insert and let system assign IDs (IDENTITY_INSERT OFF) 'mt_id is Null'
+            if not gdf_without_id.empty:
+                print (len(gdf_without_id), "records without mt_id are about to insert.")
+                logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
+                mapping = upload_gdf_to_sqlserver(
+                    gdf=gdf_without_id,
+                    mapping_fields=no_id_mapping,
+                    target_table=f"dbo.{target_table}",
+                    use_identity_insert=False,
+                    return_identity_mapping=True
+                )
+
+            # Store gloabally the zone_ids : new assigned MT ids by the system
+            # Save the mapping only if target table is PORT_TERMINALS
+            if target_table == "PORTS":
+                zoneid_to_new_portid.update(mapping)
+                #print ("zoneid_to_new_portid:",zoneid_to_new_portid)
+                #save it locally in CSV file
+                pd.DataFrame.from_dict(zoneid_to_new_portid, orient='index', columns=['new_port_id']) \
+                    .rename_axis('zone_id') \
+                    .reset_index() \
+                    .to_csv(f"zoneid_to_new_portid_mapping.csv", index=False)
+
+        # Create subset for Port_Terminals & SMDG tables
+        Ports_df = create_df_subset(gdf, port_mapping_fields)
+        Alt_names_df = create_df_subset(gdf, alt_port_name_mapping_fields)
+
+        ###Upload PORTS
+        upload_port_data("PORTS", port_mapping_fields, Ports_df)
+        ###Upload R_PORT_ALTNAMES
+        #upload_port_data("R_PORT_ALTNAMES", alt_port_name_mapping_fields, Alt_names_df)
 
     except Exception as e:
         print(f"Error in update_ports(): {str(e)}")
@@ -348,7 +379,7 @@ def update_berths():
 
         # Assign the new PORT_ID given by the system for cases when Ports in PG and MT are not matched
 
-        #### Bypassing mapping dict START ###
+        #### START Bypassing mapping dict START ###
         ##Bypassing the dynamic creation of the global dict and read from local file
         import csv
         with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
@@ -357,7 +388,7 @@ def update_berths():
                 zone_id = int(row['zone_id'])
                 new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                 zoneid_to_new_portid[zone_id] = new_port_id
-        #### Bypassing mapping dict END ###
+        #### END Bypassing mapping dict END ###
 
         before_nulls = gdf['mt_port_id'].isna().sum()
         print(f"Null mt_port_id before mapping: {before_nulls}")
@@ -393,7 +424,7 @@ def update_berths():
         gdf_with_id = gdf[gdf['mt_id'].notnull()].copy() #when mt_id is not null, match
         gdf_without_id = gdf[gdf['mt_id'].isnull()].copy() #when mt_id is null, no match
 
-        # Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
+        # A. Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
         if not gdf_with_id.empty:
             print(len(gdf_without_id), "records with mt_id are about to insert.")
             logging.info(f"{len(gdf_without_id)} records with mt_id are about to insert.")
@@ -403,13 +434,10 @@ def update_berths():
                 target_table="dbo.PORT_BERTHS",
                 use_identity_insert=True
             )
-        #double check
-        #sql_conn.commit()
 
-        # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
+        # B. Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
         no_id_mapping = berth_mapping_fields.copy()
         del no_id_mapping['mt_id']
-
         if not gdf_without_id.empty:
             print (len(gdf_without_id), "records without mt_id are about to insert.")
             logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
@@ -434,22 +462,25 @@ def update_terminals():
     pg_Terminal_query = """
         SELECT 
             zone_id,
-            mt_id,
+            terminal_id,
             mt_port_id,
-            name,
-            zone_type,
-            port_id,
-            facility_name,
-            company_name,
-            smdg_name,
+            unlocode,
+            terminal_code,
+            terminal_facility_name,
+            terminal_company_name,
+            lat,
+            lon,
             smdg_listing_date,
             smdg_unlisting_date,
             smdg_updated_date,
             terminal_website,
             terminal_address,
-            additional_terminal_info,
+            remarks, 
+            port_id,
+            name,
+            zone_type, 
             polygon_geom
-        FROM sandbox.mview_master_terminals
+        FROM sandbox.mview_master_terminals_mt
         """
     try:
         print("read_postgis...")
@@ -469,8 +500,6 @@ def update_terminals():
             gdf.set_crs(epsg=4326, inplace=True)
         print("gdf.crs: ", gdf.crs)
 
-        # Assign the new PORT_ID given by the system for cases when Ports in PG and MT are not matched
-
         #### Bypassing mapping dict START ###
         ##Bypassing the dynamic creation of the global dict and read from local file
         import csv
@@ -480,11 +509,12 @@ def update_terminals():
                 zone_id = int(row['zone_id'])
                 new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                 zoneid_to_new_portid[zone_id] = new_port_id
-        #### Bypassing mapping dict END ###
 
+        #### Bypassing mapping dict END ###
         before_nulls = gdf['mt_port_id'].isna().sum()
         print(f"Null mt_port_id before mapping: {before_nulls}")
         logging.info(f"Null mt_port_id before mapping: {before_nulls}")
+        #Assign the new Port_id set by auto-increment to the related objects
         for idx, row in gdf.iterrows():
             mt_port_id = row['mt_port_id']
             if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
@@ -495,67 +525,98 @@ def update_terminals():
         logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         # Define mapping: source field -> target SQL Server field
+        # source table: sandbox.mview_master_terminals
+        # target table: PORT_TERMINALS
         terminal_mapping_fields = {
             # 'zone_id':'',
-            'mt_id': 'TERMINAL_ID',
+            'terminal_id': 'TERMINAL_ID',
             'name': 'TERMINAL_NAME',  # 50 char limit
             'mt_port_id': 'PORT_ID',
         }
 
-        #Create subset for Port_Terminals table
-        terminals_gdf = create_df_subset(gdf,terminal_mapping_fields)
+        #source table: sandbox.mview_master_terminals_mt
+        # target table: ais.dbo.smdg_terminal_codes
+        smdg_mapping_fields = {
+            # 'zone_id':'',
+            'terminal_id': 'terminal_id',
+            'unlocode': 'unlocode',
+            'terminal_code': 'terminal_code',
+            'terminal_facility_name': 'terminal_facility_name',
+            'terminal_company_name': 'terminal_company_name',
+            'lat': 'lat',
+            'lon': 'lon',
+            'smdg_listing_date': 'smdg_listing_date',
+            'smdg_unlisting_date': 'smdg_unlisting_date',
+            'smdg_updated_date': 'smdg_updated_date',
+            'terminal_website': 'terminal_website',
+            'terminal_address': 'terminal_address',
+            'remarks': 'remarks'
+        }
 
-        # Split dataset
-        gdf_with_id = terminals_gdf[terminals_gdf['mt_id'].notnull()].copy()  # when mt_id is not null, match
-        gdf_without_id = terminals_gdf[terminals_gdf['mt_id'].isnull()].copy()  # when mt_id is null, no match
+        def upload_terminal_data(target_table, field_mapping, df):
+            print ("Target table:",target_table)
 
-        # Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
-        if not gdf_with_id.empty:
-            print(len(gdf_with_id), "records with mt_id are about to insert.")
-            logging.info(f"{len(gdf_with_id)} records with mt_id are about to insert.")
-            upload_gdf_to_sqlserver(
-                gdf=gdf_with_id,
-                mapping_fields=terminal_mapping_fields,
-                target_table="dbo.PORT_TERMINALS",
-                use_identity_insert=True
-            )
-        # double check
-        # sql_conn.commit()
+            # Split dataset
+            gdf_with_id = df[df['terminal_id'].notnull()].copy()  # when terminal_id is not null, match
+            gdf_without_id = df[df['terminal_id'].isnull()].copy()  # when terminal_id is null, no match
+            #A. Insert with explicit ID (IDENTITY_INSERT ON) mt_id not Null
+            if not gdf_with_id.empty:
+                print(len(gdf_with_id), "records with mt_id are about to insert.")
+                logging.info(f"{len(gdf_with_id)} records with mt_id are about to insert.")
+                upload_gdf_to_sqlserver(
+                    gdf=gdf_with_id,
+                    mapping_fields=field_mapping,
+                    target_table=f"dbo.{target_table}",
+                    use_identity_insert=True
+                )
+            #B. Insert with IDENTITY_INSERT OFF mt_id is Null
+            # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
+            no_id_mapping = field_mapping.copy()
+            del no_id_mapping['terminal_id']
+            if not gdf_without_id.empty:
+                print(len(gdf_without_id), "records without mt_id are about to insert.")
+                logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
+                mapping = upload_gdf_to_sqlserver(
+                    gdf=gdf_without_id,
+                    mapping_fields=no_id_mapping,
+                    target_table=f"dbo.{target_table}",
+                    use_identity_insert=False,
+                    return_identity_mapping=True
+                )
+            #Save the mapping only if target table is PORT_TERMINALS
+            if target_table == "PORT_TERMINALS":
+                # Store globally the {zone_ids:new assigned MT ids} dict by the system
+                zoneid_to_new_terminalid.update(mapping)
+                print ("zoneid_to_new_terminalid:",zoneid_to_new_terminalid)
+                #save it locally in CSV file
+                pd.DataFrame.from_dict(zoneid_to_new_terminalid, orient='index', columns=['new_terminal_id']) \
+                    .rename_axis('zone_id') \
+                    .reset_index() \
+                    .to_csv(f"zoneid_to_new_terminalid_mapping.csv", index=False)
 
-        # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
-        no_id_mapping = terminal_mapping_fields.copy()
-        del no_id_mapping['mt_id']
+        #Create subset for Port_Terminals & SMDG tables
+        terminals_df = create_df_subset(gdf,terminal_mapping_fields)
+        SMDG_df = create_df_subset(gdf, smdg_mapping_fields)
+        #Clean SMDG df
+        filtered_SMDG = SMDG_df[SMDG_df['terminal_code'].notnull() & (SMDG_df['terminal_code'] != '')]
 
-        if not gdf_without_id.empty:
-            print(len(gdf_without_id), "records without mt_id are about to insert.")
-            logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
-            mapping = upload_gdf_to_sqlserver(
-                gdf=gdf_without_id,
-                mapping_fields=no_id_mapping,
-                target_table="dbo.PORT_TERMINALS",
-                use_identity_insert=False,
-                return_identity_mapping=True
-            )
-        # Store globally the zone_ids : new assigned MT ids by the system
-        zoneid_to_new_portid.update(mapping)
-        print ("zoneid_to_new_portid:",zoneid_to_new_portid)
-        #save it locally in CSV file
-        pd.DataFrame.from_dict(zoneid_to_new_portid, orient='index', columns=['new_port_id']) \
-            .rename_axis('zone_id') \
-            .reset_index() \
-            .to_csv(f"zoneid_to_new_portid_mapping_TERMINALS.csv", index=False)
+        ###Upload PORT_TERMINALS
+        upload_terminal_data("PORT_TERMINALS", terminal_mapping_fields, terminals_df)
+        ###Upload smdg
+        #upload_terminal_data("smdg_terminal_codes", smdg_mapping_fields, filtered_SMDG)
+
+
     except Exception as e:
         print(f"Error in update_terminals(): {str(e)}")
         logging.error(f"Error in update_terminals(): {str(e)}")
         traceback.print_exc()
 
-
 # --- MAIN ---
 if __name__ == "__main__":
     try:
-        #update_ports()
+        update_ports()
         #update_berths()
-        update_terminals()
+        #update_terminals()
     finally:
         sql_cur.close()
         sql_conn.close()
