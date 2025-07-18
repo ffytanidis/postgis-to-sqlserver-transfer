@@ -10,6 +10,7 @@ import traceback, logging
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
 import math
+from typing import Union, List
 # Load environment variables from .env
 load_dotenv()
 
@@ -211,11 +212,16 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
         sql_conn.rollback()
 
 # --- Function to Update Ports ---
-def update_ports():
+def update_ports(port_list = None):
     print("Starting to update PORTS...")
     logging.info("Starting to update PORTS...")
+    if isinstance(port_list, list):
+        id_str = ', '.join(str(i) for i in port_list)
+        sql_where = f'zone_id in ({id_str})'
+    else:
+        sql_where = '1=1'
     #sql query to get Ports
-    pg_Port_query = """
+    pg_Port_query = f"""
     SELECT 
         zone_id,
         mt_id,
@@ -234,7 +240,7 @@ def update_ports():
         related_zone_anch_id,
         related_zone_port_id,
         polygon_geom
-    FROM sandbox.mview_master_ports
+    FROM sandbox.mview_master_ports where {sql_where}
     """
     try:
         print("read_postgis...")
@@ -252,6 +258,8 @@ def update_ports():
         if gdf.crs is None:
             gdf.set_crs(epsg=4326, inplace=True)
         print ("gdf.crs: ",gdf.crs)
+
+
 
         # Define mapping: source field -> target SQL Server field
         #PORTS
@@ -295,11 +303,12 @@ def update_ports():
             #double check
             sql_conn.commit()
 
+            # B. Insert and let system assign IDs (IDENTITY_INSERT OFF) 'mt_id is Null'
             # Remove 'mt_id' from mapping for auto-increment insert to handle cases with mt_id is Null
             no_id_mapping = field_mapping.copy()
             del no_id_mapping['mt_id']
 
-            #B. Insert and let system assign IDs (IDENTITY_INSERT OFF) 'mt_id is Null'
+            print ("gdf_without_id.empty: ",gdf_without_id.empty)
             if not gdf_without_id.empty:
                 print (len(gdf_without_id), "records without mt_id are about to insert.")
                 logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
@@ -310,6 +319,8 @@ def update_ports():
                     use_identity_insert=False,
                     return_identity_mapping=True
                 )
+            else:
+                return
 
             # Store gloabally the zone_ids : new assigned MT ids by the system
             # Save the mapping only if target table is PORT_TERMINALS
@@ -328,6 +339,31 @@ def update_ports():
 
         ###Upload PORTS
         upload_port_data("PORTS", port_mapping_fields, Ports_df)
+
+        #### Read the mapping csv file to get the new mt_ids
+        ##Bypassing the dynamic creation of the global dict and read from local file
+        import csv
+        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+            reader = csv.DictReader(csvfile)
+            for row in reader:
+                zone_id = int(row['zone_id'])
+                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                zoneid_to_new_portid[zone_id] = new_port_id
+        #### Bypassing mapping dict END ###
+        # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
+        before_nulls = Alt_names_df['mt_port_id'].isna().sum()
+        print(f"Null mt_port_id before mapping: {before_nulls}")
+        logging.info(f"Null mt_port_id before mapping: {before_nulls}")
+        # Assign the new Port_id set by auto-increment to the related objects
+        for idx, row in Alt_names_df.iterrows():
+            mt_port_id = row['mt_port_id']
+            if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
+                Alt_names_df.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
+        # Count nulls after update
+        after_nulls = Alt_names_df['mt_port_id'].isna().sum()
+        print(f"Null mt_port_id after mapping: {after_nulls}")
+        logging.info(f"Null mt_port_id after mapping: {after_nulls}")
+
         ###Upload R_PORT_ALTNAMES
         #upload_port_data("R_PORT_ALTNAMES", alt_port_name_mapping_fields, Alt_names_df)
 
@@ -337,11 +373,16 @@ def update_ports():
         traceback.print_exc()
 
 # --- Function to Update Berths ---
-def update_berths():
+def update_berths(port_list = None):
     print("Starting to update BERTHS...")
     logging.info("Starting to update BERTHS...")
+    if isinstance(port_list, list):
+        id_str = ', '.join(str(i) for i in port_list)
+        sql_where = f'zone_id in ({id_str})'
+    else:
+        sql_where = '1=1'
     #sql query to get Ports
-    pg_Berth_query = """
+    pg_Berth_query = f"""
     SELECT 
         zone_id,
         mt_id,
@@ -358,7 +399,7 @@ def update_berths():
         "DESCRIPTION",
         "MAX_TIDAL_DRAUGHT",
         polygon_geom
-    FROM sandbox.mview_master_berths
+    FROM sandbox.mview_master_berths where {sql_where}
     """
     try:
         print("read_postgis...")
@@ -455,13 +496,20 @@ def update_berths():
         traceback.print_exc()
 
 # --- Function to Update Terminals ---
-def update_terminals():
+def update_terminals(port_list = None):
     print("Starting to update Terminals...")
     logging.info("Starting to update Terminals...")
+    if isinstance(port_list, list):
+        id_str = ', '.join(str(i) for i in port_list)
+        sql_where = f'zone_id in ({id_str})'
+
+    else:
+        sql_where = '1=1'
     # sql query to get Ports
-    pg_Terminal_query = """
+    pg_Terminal_query = f"""
         SELECT 
             zone_id,
+            port_id,
             terminal_id,
             mt_port_id,
             unlocode,
@@ -475,12 +523,11 @@ def update_terminals():
             smdg_updated_date,
             terminal_website,
             terminal_address,
-            remarks, 
-            port_id,
+            remarks,
             name,
             zone_type, 
             polygon_geom
-        FROM sandbox.mview_master_terminals_mt
+        FROM sandbox.mview_master_terminals_mt where {sql_where}
         """
     try:
         print("read_postgis...")
@@ -509,8 +556,9 @@ def update_terminals():
                 zone_id = int(row['zone_id'])
                 new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                 zoneid_to_new_portid[zone_id] = new_port_id
-
         #### Bypassing mapping dict END ###
+
+        # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
         before_nulls = gdf['mt_port_id'].isna().sum()
         print(f"Null mt_port_id before mapping: {before_nulls}")
         logging.info(f"Null mt_port_id before mapping: {before_nulls}")
@@ -612,11 +660,32 @@ def update_terminals():
         traceback.print_exc()
 
 # --- MAIN ---
+Port_testing_list = [105,
+123,
+110,
+245,
+2381,
+864,
+16876,
+2430,
+1140,
+1325,
+1372,
+842,
+16839,
+13370,
+156,
+350,
+900,
+120,
+758,
+354]
+#mt_port_list = [117,122,134,137,170,262,373,377,794,883,919,970,1253,1459,1505,2715,2745,18411,22221,22264]
 if __name__ == "__main__":
     try:
-        update_ports()
-        #update_berths()
-        #update_terminals()
+        update_ports(Port_testing_list)
+        update_berths(Port_testing_list)
+        update_terminals(Port_testing_list)
     finally:
         sql_cur.close()
         sql_conn.close()
