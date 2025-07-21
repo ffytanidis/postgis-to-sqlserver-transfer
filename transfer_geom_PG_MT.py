@@ -433,7 +433,7 @@ def update_berths(port_list = None):
                     gdf.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
 
         #Read New terminal ids mapping given in MT system
-        if os.path.exists('zoneid_to_new_portid_mapping.csv'):
+        if os.path.exists('zoneid_to_new_terminalid_mapping.csv'):
             with open('zoneid_to_new_terminalid_mapping.csv', mode='r', newline='') as csvfile:
                 reader = csv.DictReader(csvfile)
                 for row in reader:
