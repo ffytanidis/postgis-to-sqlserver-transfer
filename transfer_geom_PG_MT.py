@@ -260,7 +260,6 @@ def update_ports(port_list = None):
         print ("gdf.crs: ",gdf.crs)
 
 
-
         # Define mapping: source field -> target SQL Server field
         #PORTS
         port_mapping_fields = {
@@ -344,30 +343,20 @@ def update_ports(port_list = None):
         #### Read the mapping csv file to get the new mt_ids
         ##Bypassing the dynamic creation of the global dict and read from local file
         import csv
-        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                zone_id = int(row['zone_id'])
-                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
-                zoneid_to_new_portid[zone_id] = new_port_id
-        #### Bypassing mapping dict END ###
 
-        # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
-
-        before_nulls = Alt_names_df['mt_id'].isna().sum()
-        ####### NEEDS IMPROVEMENT
-        if before_nulls > 0:
-            print(f"Null mt_port_id before mapping: {before_nulls}")
-            logging.info(f"Null mt_port_id before mapping: {before_nulls}")
-            # Assign the new Port_id set by auto-increment to the related objects
+        if os.path.exists('zoneid_to_new_portid_mapping.csv'):
+            with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    zone_id = int(row['zone_id'])
+                    new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                    zoneid_to_new_portid[zone_id] = new_port_id
+            #Update missing values in new mt port_id to use it in the R_PORT_ALTNAMES table
             for idx, row in Alt_names_df.iterrows():
                 mt_port_id = row['mt_id']
                 if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
                     Alt_names_df.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
-            # Count nulls after update
-            after_nulls = Alt_names_df['mt_port_id'].isna().sum()
-            print(f"Null mt_port_id after mapping: {after_nulls}")
-            logging.info(f"Null mt_port_id after mapping: {after_nulls}")
+
 
         ###Upload R_PORT_ALTNAMES
         #upload_port_data("R_PORT_ALTNAMES", alt_port_name_mapping_fields, Alt_names_df)
@@ -391,11 +380,12 @@ def update_berths(port_list = None):
     SELECT 
         zone_id,
         mt_id,
+        terminal_id,
+        mt_terminal_id,
+        port_id,
         mt_port_id,
         name,
         zone_type,
-        terminal_id,
-        port_id,
         "MAX_LENGTH",
         "MAX_DRAUGHT",
         "MAX_BREADTH",
@@ -426,28 +416,37 @@ def update_berths(port_list = None):
         # Assign the new PORT_ID given by the system for cases when Ports in PG and MT are not matched
 
         #### START Bypassing mapping dict START ###
+        # Read New Port ids mapping given in MT system
         ##Bypassing the dynamic creation of the global dict and read from local file
         import csv
-        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                zone_id = int(row['zone_id'])
-                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
-                zoneid_to_new_portid[zone_id] = new_port_id
+        if os.path.exists('zoneid_to_new_portid_mapping.csv'):
+            with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    zone_id = int(row['zone_id'])
+                    new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                    zoneid_to_new_portid[zone_id] = new_port_id
+            #Update null values in mt port_id
+            for idx, row in gdf.iterrows():
+                mt_port_id = row['mt_port_id']
+                if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
+                    gdf.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
 
+        #Read New terminal ids mapping given in MT system
+        if os.path.exists('zoneid_to_new_portid_mapping.csv'):
+            with open('zoneid_to_new_terminalid_mapping.csv', mode='r', newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    zone_id = int(row['zone_id'])
+                    new_terminal_id = int(row['new_terminal_id']) if row['new_terminal_id'] else None
+                    zoneid_to_new_terminalid[zone_id] = new_terminal_id
+            #update null values in me terminal id
+            for idx, row in gdf.iterrows():
+                mt_terminal_id = row['mt_terminal_id']
+                if pd.isnull(mt_terminal_id) and row['terminal_id'] in zoneid_to_new_terminalid:
+                    gdf.at[idx, 'mt_terminal_id'] = zoneid_to_new_terminalid[row['terminal_id']]
         #### END Bypassing mapping dict END ###
 
-        before_nulls = gdf['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id before mapping: {before_nulls}")
-        logging.info(f"Null mt_port_id before mapping: {before_nulls}")
-        for idx, row in gdf.iterrows():
-            mt_port_id = row['mt_port_id']
-            if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
-                gdf.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
-        # Count nulls after update
-        after_nulls = gdf['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id after mapping: {after_nulls}")
-        logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         # Define mapping: source field -> target SQL Server field
         berth_mapping_fields = {
@@ -455,7 +454,7 @@ def update_berths(port_list = None):
             'mt_id':'BERTH_ID',
             'name':'BERTH_NAME',#30 char limit
             #'zone_type':'',
-            'terminal_id':'TERMINAL_ID',
+            'mt_terminal_id':'TERMINAL_ID',
             'mt_port_id':'PORT_ID',
             'MAX_LENGTH':'MAX_LENGTH',
             'MAX_DRAUGHT':'MAX_DRAUGHT',
@@ -495,6 +494,8 @@ def update_berths(port_list = None):
                 use_identity_insert=False,
                 return_identity_mapping=False
             )
+        else:
+            return
 
     except Exception as e:
         print(f"Error in update_berths(): {str(e)}")
@@ -507,8 +508,7 @@ def update_terminals(port_list = None):
     logging.info("Starting to update Terminals...")
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
-        sql_where = f'zone_id in ({id_str})'
-
+        sql_where = f'port_id in ({id_str})'
     else:
         sql_where = '1=1'
     # sql query to get Ports
@@ -556,27 +556,29 @@ def update_terminals(port_list = None):
         #### Bypassing mapping dict START ###
         ##Bypassing the dynamic creation of the global dict and read from local file
         import csv
-        with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
-            reader = csv.DictReader(csvfile)
-            for row in reader:
-                zone_id = int(row['zone_id'])
-                new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
-                zoneid_to_new_portid[zone_id] = new_port_id
-        #### Bypassing mapping dict END ###
 
-        # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
-        before_nulls = gdf['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id before mapping: {before_nulls}")
-        logging.info(f"Null mt_port_id before mapping: {before_nulls}")
-        #Assign the new Port_id set by auto-increment to the related objects
-        for idx, row in gdf.iterrows():
-            mt_port_id = row['mt_port_id']
-            if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
-                gdf.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
-        # Count nulls after update
-        after_nulls = gdf['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id after mapping: {after_nulls}")
-        logging.info(f"Null mt_port_id after mapping: {after_nulls}")
+        if os.path.exists('zoneid_to_new_portid_mapping.csv'):
+            with open('zoneid_to_new_portid_mapping.csv', mode='r', newline='') as csvfile:
+                reader = csv.DictReader(csvfile)
+                for row in reader:
+                    zone_id = int(row['zone_id'])
+                    new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
+                    zoneid_to_new_portid[zone_id] = new_port_id
+            #### Bypassing mapping dict END ###
+
+            # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
+            before_nulls = gdf['mt_port_id'].isna().sum()
+            print(f"Null mt_port_id before mapping: {before_nulls}")
+            logging.info(f"Null mt_port_id before mapping: {before_nulls}")
+            #Assign the new Port_id set by auto-increment to the related objects
+            for idx, row in gdf.iterrows():
+                mt_port_id = row['mt_port_id']
+                if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
+                    gdf.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
+            # Count nulls after update
+            after_nulls = gdf['mt_port_id'].isna().sum()
+            print(f"Null mt_port_id after mapping: {after_nulls}")
+            logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         # Define mapping: source field -> target SQL Server field
         # source table: sandbox.mview_master_terminals
@@ -637,6 +639,7 @@ def update_terminals(port_list = None):
                     use_identity_insert=False,
                     return_identity_mapping=True
                 )
+            else: return
             #Save the mapping only if target table is PORT_TERMINALS
             if target_table == "PORT_TERMINALS":
                 # Store globally the {zone_ids:new assigned MT ids} dict by the system
@@ -672,8 +675,9 @@ Port_testing_list = [12474]
 if __name__ == "__main__":
     try:
         update_ports(Port_testing_list)
-        update_berths(Port_testing_list)
         update_terminals(Port_testing_list)
+        update_berths(Port_testing_list)
+
     finally:
         sql_cur.close()
         sql_conn.close()
