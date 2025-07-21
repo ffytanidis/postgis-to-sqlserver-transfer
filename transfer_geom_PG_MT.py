@@ -308,7 +308,7 @@ def update_ports(port_list = None):
             no_id_mapping = field_mapping.copy()
             del no_id_mapping['mt_id']
 
-            print ("gdf_without_id.empty: ",gdf_without_id.empty)
+            #print ("gdf_without_id.empty: ",gdf_without_id.empty)
             if not gdf_without_id.empty:
                 print (len(gdf_without_id), "records without mt_id are about to insert.")
                 logging.info(f"{len(gdf_without_id)} records without mt_id are about to insert.")
@@ -322,7 +322,7 @@ def update_ports(port_list = None):
             else:
                 return
 
-            # Store gloabally the zone_ids : new assigned MT ids by the system
+            # Store globally the zone_ids : new assigned MT ids by the system
             # Save the mapping only if target table is PORT_TERMINALS
             if target_table == "PORTS":
                 zoneid_to_new_portid.update(mapping)
@@ -336,6 +336,7 @@ def update_ports(port_list = None):
         # Create subset for Port_Terminals & SMDG tables
         Ports_df = create_df_subset(gdf, port_mapping_fields)
         Alt_names_df = create_df_subset(gdf, alt_port_name_mapping_fields)
+        #print ("Alt_names_df:",Alt_names_df.columns)
 
         ###Upload PORTS
         upload_port_data("PORTS", port_mapping_fields, Ports_df)
@@ -350,19 +351,23 @@ def update_ports(port_list = None):
                 new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                 zoneid_to_new_portid[zone_id] = new_port_id
         #### Bypassing mapping dict END ###
+
         # Update the missing mt_port_id from the csv zone_id<->mt_new_port_id
-        before_nulls = Alt_names_df['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id before mapping: {before_nulls}")
-        logging.info(f"Null mt_port_id before mapping: {before_nulls}")
-        # Assign the new Port_id set by auto-increment to the related objects
-        for idx, row in Alt_names_df.iterrows():
-            mt_port_id = row['mt_port_id']
-            if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
-                Alt_names_df.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
-        # Count nulls after update
-        after_nulls = Alt_names_df['mt_port_id'].isna().sum()
-        print(f"Null mt_port_id after mapping: {after_nulls}")
-        logging.info(f"Null mt_port_id after mapping: {after_nulls}")
+
+        before_nulls = Alt_names_df['mt_id'].isna().sum()
+        ####### NEEDS IMPROVEMENT
+        if before_nulls > 0:
+            print(f"Null mt_port_id before mapping: {before_nulls}")
+            logging.info(f"Null mt_port_id before mapping: {before_nulls}")
+            # Assign the new Port_id set by auto-increment to the related objects
+            for idx, row in Alt_names_df.iterrows():
+                mt_port_id = row['mt_id']
+                if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
+                    Alt_names_df.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
+            # Count nulls after update
+            after_nulls = Alt_names_df['mt_port_id'].isna().sum()
+            print(f"Null mt_port_id after mapping: {after_nulls}")
+            logging.info(f"Null mt_port_id after mapping: {after_nulls}")
 
         ###Upload R_PORT_ALTNAMES
         #upload_port_data("R_PORT_ALTNAMES", alt_port_name_mapping_fields, Alt_names_df)
@@ -378,7 +383,7 @@ def update_berths(port_list = None):
     logging.info("Starting to update BERTHS...")
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
-        sql_where = f'zone_id in ({id_str})'
+        sql_where = f'port_id in ({id_str})'
     else:
         sql_where = '1=1'
     #sql query to get Ports
@@ -429,6 +434,7 @@ def update_berths(port_list = None):
                 zone_id = int(row['zone_id'])
                 new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                 zoneid_to_new_portid[zone_id] = new_port_id
+
         #### END Bypassing mapping dict END ###
 
         before_nulls = gdf['mt_port_id'].isna().sum()
@@ -645,6 +651,7 @@ def update_terminals(port_list = None):
         #Create subset for Port_Terminals & SMDG tables
         terminals_df = create_df_subset(gdf,terminal_mapping_fields)
         SMDG_df = create_df_subset(gdf, smdg_mapping_fields)
+
         #Clean SMDG df
         filtered_SMDG = SMDG_df[SMDG_df['terminal_code'].notnull() & (SMDG_df['terminal_code'] != '')]
 
@@ -660,26 +667,7 @@ def update_terminals(port_list = None):
         traceback.print_exc()
 
 # --- MAIN ---
-Port_testing_list = [105,
-123,
-110,
-245,
-2381,
-864,
-16876,
-2430,
-1140,
-1325,
-1372,
-842,
-16839,
-13370,
-156,
-350,
-900,
-120,
-758,
-354]
+Port_testing_list = [12474]
 #mt_port_list = [117,122,134,137,170,262,373,377,794,883,919,970,1253,1459,1505,2715,2745,18411,22221,22264]
 if __name__ == "__main__":
     try:
