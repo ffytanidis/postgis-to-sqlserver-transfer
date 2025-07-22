@@ -56,6 +56,10 @@ def fix_target_value(target_field, value):
     # set max field lenths
     MAX_FIELD_LENGTHS = {
         'PORT_NAME': 20,
+        'ALTNAME1': 20,
+        'ALTNAME2': 20,
+        'ALTNAME3': 20,
+        'ALTNAME4': 20,
         'BERTH_NAME': 30,
         'TERMINAL_NAME' : 50
     }
@@ -226,6 +230,10 @@ def update_ports(port_list = None):
         zone_id,
         mt_id,
         name,
+        (coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[1] as alt1,
+    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[2] as alt2,
+    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[3] as alt3,
+    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[4] as alt4,
         zone_type,
         unlocode,
         country_code,
@@ -265,6 +273,10 @@ def update_ports(port_list = None):
         port_mapping_fields = {
             'mt_id': 'PORT_ID',
             'name': 'PORT_NAME',
+            'alt1': 'ALTNAME1',
+            'alt2': 'ALTNAME2',
+            'alt3': 'ALTNAME3',
+            'alt4': 'ALTNAME4',
             'zone_type': 'PORT_TYPE',
             'unlocode': 'UNLOCODE',
             'country_code': 'COUNTRY_CODE',
@@ -278,12 +290,7 @@ def update_ports(port_list = None):
             'related_zone_port_id': 'RELATED_PORT_ID',
             'polygon_geom': 'POLYGON'
         }
-        #R_PORT_ALTNAMES
-        alt_port_name_mapping_fields = {
-            'mt_id': 'PORT_ID',
-            'alternative_names': 'ALTERNATIVE_NAMES',
-            'alternative_unlocodes': 'ALTERNATIVE_UNLOCODES',
-        }
+
         def upload_port_data(target_table, field_mapping, gdf):
             print ("Target table:",target_table)
 
@@ -334,8 +341,6 @@ def update_ports(port_list = None):
 
         # Create subset for Port_Terminals & SMDG tables
         Ports_df = create_df_subset(gdf, port_mapping_fields)
-        Alt_names_df = create_df_subset(gdf, alt_port_name_mapping_fields)
-        #print ("Alt_names_df:",Alt_names_df.columns)
 
         ###Upload PORTS
         upload_port_data("PORTS", port_mapping_fields, Ports_df)
@@ -351,15 +356,42 @@ def update_ports(port_list = None):
                     zone_id = int(row['zone_id'])
                     new_port_id = int(row['new_port_id']) if row['new_port_id'] else None
                     zoneid_to_new_portid[zone_id] = new_port_id
-            #Update missing values in new mt port_id to use it in the R_PORT_ALTNAMES table
-            for idx, row in Alt_names_df.iterrows():
-                mt_port_id = row['mt_id']
-                if pd.isnull(mt_port_id) and row['port_id'] in zoneid_to_new_portid:
-                    Alt_names_df.at[idx, 'mt_port_id'] = zoneid_to_new_portid[row['port_id']]
 
+        ### R_PORT_ALTNAMES        
+        ## Read            
+        pg_Port_alias_query = f"""
+        select 
+            zone_id, 
+            mt_id, 
+            unnest(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}')) as alias_name
+        from sandbox.mview_master_ports where {sql_where}
+        """        
+        df_alias = pd.read_sql(
+            sql=pg_Port_alias_query,
+            con=pg_engine,
+        )
 
-        ###Upload R_PORT_ALTNAMES
-        #upload_port_data("R_PORT_ALTNAMES", alt_port_name_mapping_fields, Alt_names_df)
+        ## Clean        
+        df_alias['alias_name'] = df_alias['alias_name'].str[:20] # temporal solution of chararacters limitation: keep only first 20 characters
+        df_alias['mt_id'] = df_alias['mt_id'].astype('Int64')  # nullable integer
+
+        ## fill missing mt_id values using the dictionary mapped by zone_id
+        df_alias['mt_id'] = df_alias.apply(lambda row: zoneid_to_new_portid.get(row['zone_id']) if pd.isna(row['mt_id']) else row['mt_id'], axis=1)
+
+        ## Upload to MT alias table
+        insert_query = """
+            INSERT INTO dbo.R_PORT_ALTNAMES (port_id, alias_name)
+            VALUES (?, ?)
+        """
+        
+        # insert rows one by one
+        for _, row in df_alias.iterrows():
+            if pd.notna(row['mt_id']) and pd.notna(row['alias_name']):
+                sql_cur.execute(insert_query, int(row['mt_id']), row['alias_name'])
+        
+        # commit after all inserts
+        sql_conn.commit()
+        
 
     except Exception as e:
         print(f"Error in update_ports(): {str(e)}")
@@ -670,7 +702,7 @@ def update_terminals(port_list = None):
         traceback.print_exc()
 
 # --- MAIN ---
-Port_testing_list = [12474]
+Port_testing_list = [1, 186587]
 #mt_port_list = [117,122,134,137,170,262,373,377,794,883,919,970,1253,1459,1505,2715,2745,18411,22221,22264]
 if __name__ == "__main__":
     try:
@@ -682,3 +714,5 @@ if __name__ == "__main__":
         sql_cur.close()
         sql_conn.close()
         print("SQL Server connection closed.")
+
+
