@@ -231,13 +231,13 @@ def update_ports(port_list = None):
         mt_id,
         name,
         (coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[1] as alt1,
-    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[2] as alt2,
-    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[3] as alt3,
-    	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[4] as alt4,
+      	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[2] as alt2,
+      	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[3] as alt3,
+      	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[4] as alt4,
         zone_type,
         unlocode,
         country_code,
-        timezone_id,
+        timezone_name,
         dst_id,
         enable_calls,
         confirmed,
@@ -282,7 +282,7 @@ def update_ports(port_list = None):
             'zone_type': 'PORT_TYPE',
             'unlocode': 'UNLOCODE',
             'country_code': 'COUNTRY_CODE',
-            'timezone_id': 'TIMEZONE',
+            'timezone_name': 'TIMEZONE',
             'dst_id': 'DST',
             'enable_calls': 'ENABLE_CALLS',
             'confirmed': 'CONFIRMED',
@@ -708,6 +708,7 @@ def update_terminals(port_list = None):
 # --- MAIN ---
 Port_testing_list = [1, 186587]
 #mt_port_list = [117,122,134,137,170,262,373,377,794,883,919,970,1253,1459,1505,2715,2745,18411,22221,22264]
+
 if __name__ == "__main__":
     try:
         update_ports(Port_testing_list)
