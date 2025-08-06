@@ -2,13 +2,13 @@
 from numpy.core.defchararray import startswith
 from sqlalchemy import create_engine, text
 import pyodbc, os
-import json
 from shapely.geometry.base import BaseGeometry
 from shapely import wkt
 from urllib.parse import quote_plus
 from dotenv import load_dotenv
 import geopandas as gpd, pandas as pd
 import traceback, logging
+from datetime import datetime
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
 import math
@@ -31,6 +31,47 @@ sql_server_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "SERVER=192.168.100.130,1437;"
     "DATABASE=ais;"
     f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}")
+
+
+
+
+
+# +
+# create timestamped SQL log file
+log_dir = "./logs"  #
+os.makedirs(log_dir, exist_ok=True)
+sql_log_path = os.path.join(log_dir, f"sql_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql")
+
+# helper function to log SQL queries
+def log_sql(sql):
+    sql = sql.strip()
+    if not sql.endswith(";"):
+        sql += ";"
+    with open(sql_log_path, "a") as f:
+        f.write(sql + "\n")
+
+def format_sql(sql, values):
+    try:
+        parts = sql.split("?")
+        if len(parts) - 1 != len(values):
+            return f"-- placeholder count mismatch: {sql} {values}"
+        
+        interpolated = parts[0]
+        for part, val in zip(parts[1:], values):
+            if val is None:
+                interpolated += "NULL"  # SQL null
+            elif isinstance(val, str):
+                interpolated += f"'{val}'"  # wrap strings in quotes
+            else:
+                interpolated += str(val)  # numbers, etc.
+            interpolated += part
+
+        return interpolated
+    except Exception as e:
+        return f"-- failed to format: {sql} {values} ({e})"
+
+
+# -
 
 # --- Create PostgreSQL engine ---
 pg_url = (
@@ -225,6 +266,7 @@ def delete_from_MT(port_list = None):
             (f"delete from dbo.port_berths where {sql_where}", "port_berths")]
         
         for query, label in queries:
+            log_sql(query)
             sql_cur.execute(query)
             print(f"🗑️ Deleted from {label}: {sql_cur.rowcount}")
         #sql_conn.commit() # Should we commit here?
@@ -328,9 +370,7 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
     print(f"Updating {target_table}...")
     insert_sql = f"""
     INSERT INTO {target_table} ({', '.join(mapping_fields.values())})
-    --OUTPUT INSERTED.PORT_ID
     VALUES ({', '.join(['?'] * len(mapping_fields))});
-    SELECT SCOPE_IDENTITY();
     """
     #Set counter
     failed_rows = 0
@@ -340,7 +380,9 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
         # Check if mt_id is not null
         if use_identity_insert:
             print(f"SET IDENTITY_INSERT {target_table} ON")
-            sql_cur.execute(f"SET IDENTITY_INSERT {target_table} ON;")
+            sql = f"SET IDENTITY_INSERT {target_table} ON;"
+            log_sql(sql)
+            sql_cur.execute(sql)
 
         for idx, row in gdf.iterrows():
             values = []
@@ -356,16 +398,18 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
                 current_row_data[target_field] = value
             #print(f"Preparing to insert into {target_table}: {dict(zip(mapping_fields.values(), values))}")
             try:
+                log_sql(format_sql(insert_sql, values))
                 sql_cur.execute(insert_sql, *values)
                 if return_identity_mapping  and not use_identity_insert:
                     if target_table == 'dbo.PORTS':
                         #PORTS-try to get the ID of the inserted record by matching the polygons
-                        sql_cur.execute(f"""
+                        sql = f"""
                             SELECT port_id
                             FROM {target_table}
                             WHERE POLYGON.STEquals(geography::STGeomFromText(?, 4326)) = 1
                             ORDER BY port_id DESC
-                        """, (values[-1],))  # assuming geometry is the last field
+                            """
+                        sql_cur.execute(sql, (values[-1],))  # assuming geometry is the last field
                     elif target_table == 'dbo.PORT_TERMINALS':
                         #TERMINALS-TRY TO GET THE id OF THE INSERTED RECORD BY MATCHING NAME & port_id
                         sql = f"""SELECT terminal_id FROM {target_table} WHERE TERMINAL_NAME = '{values[0]}' AND PORT_ID = {int(values[1])}
@@ -392,8 +436,10 @@ def upload_gdf_to_sqlserver(gdf, mapping_fields, target_table, use_identity_inse
                 continue  # Skip this bad row and continue
 
         if use_identity_insert:
-            print(f" SET IDENTITY_INSERT {target_table} OFF")
-            sql_cur.execute(f"SET IDENTITY_INSERT {target_table} OFF;")
+            sql = f" SET IDENTITY_INSERT {target_table} OFF;"
+            print(sql)
+            log_sql(sql)
+            sql_cur.execute(sql)
         # Commit changes
         sql_conn.commit()
         print(f"Uploaded {len(gdf) - failed_rows} successful records to {target_table}")
@@ -585,6 +631,7 @@ def update_ports(port_list = None):
         # insert rows one by one
         for _, row in df_alias.iterrows():
             if pd.notna(row['mt_id']) and pd.notna(row['alias_name']):
+                log_sql(format_sql(insert_query, [int(row['mt_id']), row['alias_name']]))
                 sql_cur.execute(insert_query, int(row['mt_id']), row['alias_name'])
         
         # commit after all inserts
@@ -900,8 +947,20 @@ def update_terminals(port_list = None):
         traceback.print_exc()
 
 # --- MAIN ---
-Port_testing_list = [198, 19905]
+Port_testing_list = [178590]
 #mt_port_list = [117,122,134,137,170,262,373,377,794,883,919,970,1253,1459,1505,2715,2745,18411,22221,22264]
+
+# +
+# --- Connect to SQL Server ---
+sql_conn = pyodbc.connect(sql_server_conn_str)
+print("Autocommit:", sql_conn.autocommit)
+sql_cur = sql_conn.cursor()
+
+# create timestamped SQL log file
+log_dir = "./logs"  #
+os.makedirs(log_dir, exist_ok=True)
+sql_log_path = os.path.join(log_dir, f"sql_log_{datetime.now().strftime('%Y%m%d_%H%M%S')}.sql")
+
 
 if __name__ == "__main__":
     try:
@@ -915,5 +974,6 @@ if __name__ == "__main__":
         sql_cur.close()
         sql_conn.close()
         print("SQL Server connection closed.")
+# -
 
 
