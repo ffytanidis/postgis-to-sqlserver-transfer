@@ -32,10 +32,6 @@ sql_server_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "DATABASE=ais;"
     f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}")
 
-
-
-
-
 # +
 # create timestamped SQL log file
 log_dir = "./logs"  #
@@ -84,6 +80,15 @@ pg_engine = create_engine(pg_url)
 sql_conn = pyodbc.connect(sql_server_conn_str)
 print("Autocommit:", sql_conn.autocommit)
 sql_cur = sql_conn.cursor()
+
+
+
+
+
+
+
+
+
 
 
 # Function that copies in PG sandbox tables those MT ports, and their terminals and berths, that are going to be deleted
