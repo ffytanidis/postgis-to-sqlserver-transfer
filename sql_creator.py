@@ -47,7 +47,7 @@ pg_url = (
 pg_engine = create_engine(pg_url)
 
 # --- Connect to SQL Server ---
-sql_conn = pyodbc.connect(dbdev_conn_str)
+sql_conn = pyodbc.connect(dbprim03_conn_str)
 sql_cur = sql_conn.cursor()
 
 
@@ -58,7 +58,7 @@ sql_cur = sql_conn.cursor()
 # -
 
 # Ensure correct ring orientation for polygons and multipolygons
-def correct_orientation(geom):
+def correct_orientchation(geom):
     if isinstance(geom, Polygon):
         return orient(geom)
     elif isinstance(geom, MultiPolygon):
@@ -194,6 +194,11 @@ def read_PG_ports(port_list = None):
     gdf = fill_column_with_increment(gdf, 'port_id', next_port_id)
     # relations
     gdf = fix_anch_relations(gdf)
+    #float rounding
+    gdf['sw_x'] = gdf['sw_x'].round(6)
+    gdf['sw_y'] = gdf['sw_y'].round(6)
+    gdf['ne_x'] = gdf['ne_x'].round(6)
+    gdf['ne_y'] = gdf['ne_y'].round(6)
     # string lengths
     gdf['port_name'] = gdf['port_name'].str[:20]
     gdf['altname1'] = gdf['altname1'].str[:20]
@@ -473,9 +478,11 @@ def read_mt_berths():
 
 # +
 import pandas as pd
+import geopandas as gpd
 from shapely.geometry.base import BaseGeometry
+from shapely.wkt import dumps as wkt_dumps
 
-def filter_changed_rows(df1, df2, decimals=4):
+def filter_changed_rows(df1, df2, decimals=4, geom_precision=6):
     """
     return rows from df1 that are NOT present in df2 (full-row compare),
     allowing tiny float differences by rounding to `decimals`.
@@ -491,6 +498,8 @@ def filter_changed_rows(df1, df2, decimals=4):
                   if (c in df1c and pd.api.types.is_float_dtype(df1c[c])) or
                      (c in df2c and pd.api.types.is_float_dtype(df2c[c]))]
     if float_cols:
+        print(df1c[float_cols])
+        print(df2c[float_cols])
         df1c[float_cols] = df1c[float_cols].round(decimals)
         df2c[float_cols] = df2c[float_cols].round(decimals)
 
@@ -498,8 +507,10 @@ def filter_changed_rows(df1, df2, decimals=4):
     for c in shared_cols:
         if df1c[c].apply(lambda x: isinstance(x, BaseGeometry)).any() \
            or df2c[c].apply(lambda x: isinstance(x, BaseGeometry)).any():
-            df1c[c] = df1c[c].apply(lambda g: g.wkt if isinstance(g, BaseGeometry) else g)
-            df2c[c] = df2c[c].apply(lambda g: g.wkt if isinstance(g, BaseGeometry) else g)
+            df1c[c] = df1c[c].apply(lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
+                               if isinstance(g, BaseGeometry) else g)
+            df2c[c] = df2c[c].apply(lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
+                               if isinstance(g, BaseGeometry) else g)
 
     # treat nan==nan
     df1c = df1c.where(pd.notnull(df1c), None)
@@ -517,6 +528,89 @@ def filter_changed_rows(df1, df2, decimals=4):
     # positional mask avoids index alignment issues
     mask = (merged['_merge'] == 'left_only').to_numpy()
     return df1.iloc[mask]
+
+
+# +
+import pandas as pd
+import numpy as np
+from shapely.geometry.base import BaseGeometry
+from shapely.wkt import dumps as wkt_dumps
+from pandas.util import hash_pandas_object
+
+def filter_changed_rows(df1, df2, decimals=3, geom_precision=6):
+    """
+    Return rows from df1 that are NOT present in df2 (full-row compare),
+    allowing tiny float differences by formatting/quantizing to `decimals`.
+    Uses row hashes for a fast anti-join and treats NaN == NaN.
+    """
+
+    # 1) Align on shared columns (preserve df1 order)
+    shared_cols = [c for c in df1.columns if c in df2.columns]
+    if not shared_cols:
+        # nothing to compare; everything in df1 is "changed"
+        return df1.copy()
+
+    df1c = df1[shared_cols].copy().reset_index(drop=True)
+    df2c = df2[shared_cols].copy().reset_index(drop=True)
+
+    # 2) Normalize types for comparison
+
+    # Identify numeric columns across both (union)
+    def is_numeric(s):
+        return pd.api.types.is_numeric_dtype(s)
+
+    num_cols = sorted(
+        set([c for c in shared_cols if is_numeric(df1c[c])]) |
+        set([c for c in shared_cols if is_numeric(df2c[c])])
+    )
+
+    # Identify geometry-bearing columns (any cell a shapely geometry)
+    # (vectorized-ish check to avoid scanning all rows twice)
+    def col_has_geom(s1, s2):
+        # quick short-circuit using dtype if it's a GeoSeries
+        if hasattr(s1, "geom_type") or hasattr(s2, "geom_type"):
+            return True
+        return s1.apply(lambda x: isinstance(x, BaseGeometry)).any() or \
+               s2.apply(lambda x: isinstance(x, BaseGeometry)).any()
+
+    geom_cols = [c for c in shared_cols if col_has_geom(df1c[c], df2c[c])]
+
+    # 3) Apply normalization
+    # 3a) Geometries -> WKT with precision for stable text compare
+    for c in geom_cols:
+        df1c[c] = df1c[c].apply(
+            lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
+            if isinstance(g, BaseGeometry) else g
+        )
+        df2c[c] = df2c[c].apply(
+            lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
+            if isinstance(g, BaseGeometry) else g
+        )
+
+    # 3b) Numeric tolerance: format as fixed-precision strings
+    # Using string formatting avoids binary rounding quirks during hashing/merge
+    if num_cols:
+        fmt = f"{{0:.{decimals}f}}"
+        for c in num_cols:
+            # leave NaNs as NaN for now; we'll neutralize them next
+            df1c[c] = pd.to_numeric(df1c[c], errors="coerce")
+            df2c[c] = pd.to_numeric(df2c[c], errors="coerce")
+            df1c[c] = df1c[c].apply(lambda v: fmt.format(v) if pd.notna(v) else np.nan)
+            df2c[c] = df2c[c].apply(lambda v: fmt.format(v) if pd.notna(v) else np.nan)
+
+    # 3c) Treat NaN == NaN by replacing with a shared sentinel value
+    # Use a unique object unlikely to appear otherwise
+    SENTINEL = "__<NA>__"
+    df1n = df1c.fillna(SENTINEL)
+    df2n = df2c.fillna(SENTINEL)
+
+    # 4) Hash rows and anti-join by hash membership (fast + robust)
+    h1 = hash_pandas_object(df1n, index=False)
+    h2 = hash_pandas_object(df2n, index=False)
+    mask = ~h1.isin(h2).to_numpy()
+
+    # 5) Return original (un-normalized) rows from df1 where no match was found
+    return df1.iloc[mask].copy()
 
 
 # +
@@ -548,7 +642,6 @@ def create_df_to_insert(df_new, df_existing, index_col=None):
     # keep only rows not already in existing
     mask = ~idx_new.isin(idx_existing)
     return df_new[mask].reset_index(drop=True)
-
 
 
 def create_df_to_update(df_new, df_existing, index_col):
@@ -643,24 +736,62 @@ def generate_update_sql(df, id_col, target_table):
     return '\n'.join(sql_lines)
 
 # generate INSERT statements as a string
-def generate_insert_sql(df, target_table):
-    if len(df)==0:
+def generate_insert_sql(df, target_table, identity_insert=False):
+    if len(df) == 0:
         return ''
     geom_cols = detect_geom_cols(df)
     non_geom_cols = [col for col in df.columns if col not in geom_cols]
     columns = non_geom_cols + geom_cols
 
     sql_lines = [f"-- Insert statements for table: {target_table}\n"]
-    sql_lines.append(f"SET IDENTITY_INSERT {target_table} ON;")
 
+    if identity_insert:
+        sql_lines.append(f"SET IDENTITY_INSERT {target_table} ON;")
+
+    col_names = ', '.join(columns)
     for _, row in df.iterrows():
-        col_names = ', '.join(columns)
         col_values = ', '.join(sql_format(row[col]) for col in columns)
         insert_sql = f"INSERT INTO {target_table} ({col_names}) VALUES ({col_values});"
         sql_lines.append(insert_sql)
 
-    sql_lines.append(f"SET IDENTITY_INSERT {target_table} OFF;")
+    if identity_insert:
+        sql_lines.append(f"SET IDENTITY_INSERT {target_table} OFF;")
+
     return '\n'.join(sql_lines)
+
+# generate DELETE statements as a string
+def generate_delete_sql(df, target_table, where_cols=None):
+    """
+    Build one DELETE per row.
+    - If where_cols is None, use all df.columns.
+    - NULLs use IS NULL; everything else goes through sql_format(...).
+    """
+    if len(df) == 0:
+        return ''
+
+    # decide which columns to match on
+    if where_cols is None:
+        where_cols = list(df.columns)
+    else:
+        missing = [c for c in where_cols if c not in df.columns]
+        assert not missing, f"Columns not in dataframe: {missing}"
+
+    sql_lines = [f"-- Delete statements for table: {target_table}\n"]
+
+    for _, row in df.iterrows():
+        predicates = []
+        for col in where_cols:
+            val = row[col]
+            if pd.isna(val):
+                predicates.append(f"{col} IS NULL")
+            else:
+                predicates.append(f"{col} = {sql_format(val)}")
+
+        where_clause = " AND ".join(predicates)
+        sql_lines.append(f"DELETE FROM {target_table} WHERE {where_clause};")
+
+    return "\n".join(sql_lines)
+
 
 # combine multiple SQL parts with clear separation
 def combine_sql_blocks(*blocks):
@@ -686,9 +817,9 @@ def combine_sql_blocks(*blocks):
 #next_berth_id = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
 
 # From manual input
-next_port_id = 26489
-next_terminal_id = 4938
-next_berth_id = 33332
+next_port_id = 26495
+next_terminal_id = 4996
+next_berth_id = 33412
 
 print('Next port id:', next_port_id)
 print('Next terminal id:', next_terminal_id)
@@ -697,10 +828,13 @@ print('Next berth id:', next_berth_id)
 # +
 # Input: zone_id list of port level geometries to read from PG (include related anch/ports, error will be raised if something missing)
 
-port_zone_id_list = [200843, 186378,186379, 187612, 183122, 176502, 176502]
-port_zone_id_list = [500, 197489]
+# --- Connect to SQL Server ---
+# dbdev_conn_str or dbprim03_conn_str
+sql_conn = pyodbc.connect(dbdev_conn_str) 
+sql_cur = sql_conn.cursor()
 
-port_zone_id_list = [113, 114, 501, 502, 503, 605, 606, 1159, 1160, 1161, 1162, 1163, 1164, 2965, 2970, 14491, 14499, 14547, 14548, 14549, 14550, 20849, 24936, 15270, 15271, 15290, 15291, 17534, 17769, 195848, 195849, 195850, 207376, 207377]
+port_zone_id_list = [181811, 178573, 195703, 166252, 200843, 186619, 186378, 187612, 195513, 195372, 186379]
+port_zone_id_list = [1,17]
 
 #Ports
 gdf_PG_ports = read_PG_ports(port_list = port_zone_id_list)
@@ -743,28 +877,34 @@ gdf_berths_to_delete = create_df_to_delete(gdf_PG_berths, gdf_MT_berths, 'berth_
 
 df_alt_names_to_insert = create_df_to_insert(df_PG_alt_names, df_MT_alt_names)
 df_alt_names_to_delete = create_df_to_delete(df_PG_alt_names, df_MT_alt_names)
+# -
+
+print('To delete counts:')
+print(len(gdf_ports_to_delete), 'ports')
+print(len(df_terminals_basic_to_delete), 'terminals')
+print(len(gdf_berths_to_delete), 'berths')
 
 # +
 # sql parts and combine
 
 # check_next_id 
-port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS')
+port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
-terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS')
+terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS', identity_insert=True)
 terminal_updates = generate_update_sql(df_terminals_basic_to_update, 'terminal_id', 'dbo.PORT_TERMINALS')
 # Pending: smgd updates/insderts/deletes
 
-berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS')
+berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS', identity_insert=True)
 berth_updates = generate_update_sql(gdf_berths_to_update, 'berth_id', 'dbo.PORT_BERTHS')
-r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES') # Pending: do not trigger identity
-# Pending: r_altnames_deletes = ...
+r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES', identity_insert=False) 
+r_altnames_deletes =  generate_delete_sql(df_alt_names_to_delete, 'dbo.R_PORT_ALTNAMES') 
 
 #ports_noted_to_del
 #terminals_noted_to_del (is it necessary?)
 #berths_noted_to_del
 
     
-final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts)  
+final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
 
 #write to file
 with open('sql_output.sql', 'w') as f:
@@ -774,6 +914,10 @@ print(final_sql)
 
 # -
 
-gdf_MT_ports[gdf_MT_ports['port_name'].isin(['ROVINJ PORT'])]
+
+
+
+
+
 
 
