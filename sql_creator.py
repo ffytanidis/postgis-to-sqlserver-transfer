@@ -6,20 +6,18 @@ from urllib.parse import quote_plus
 from dotenv import load_dotenv
 import geopandas as gpd
 import pandas as pd
+from pandas.util import hash_pandas_object
+import numpy as np
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
+from shapely.wkt import dumps as wkt_dumps
 import math
 import warnings
 warnings.filterwarnings('ignore')
 # Load environment variables from .env
 load_dotenv()
 
-# +
-#######################################
 # Connections
-#######################################
-# -
-
 # --- Config ---
 pg_config = {
     'username': 'analyst_ddl',
@@ -28,35 +26,29 @@ pg_config = {
     'port': 5432,
     'database': 'maritime_assets'
 }
-
 dbdev_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "SERVER=192.168.100.130,1437;"
     "DATABASE=ais;"
-    f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}")
-
+    f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}"
+                 )
 dbprim03_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "SERVER=192.168.100.151,1433;"
     "DATABASE=ais;"
-    f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}")
-
+    f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}"
+                    )
 # --- Create PostgreSQL engine ---
 pg_url = (
     f"postgresql://{pg_config['username']}:{pg_config['password']}@"
     f"{pg_config['host']}:{pg_config['port']}/{pg_config['database']}"
 )
 pg_engine = create_engine(pg_url)
-
 # --- Connect to SQL Server ---
 sql_conn = pyodbc.connect(dbprim03_conn_str)
 sql_cur = sql_conn.cursor()
 
-
-# +
-#######################################
 # Create functions
-#######################################
-# -
 
+# Fix functions
 # Ensure correct ring orientation for polygons and multipolygons
 def correct_orientchation(geom):
     if isinstance(geom, Polygon):
@@ -65,16 +57,14 @@ def correct_orientchation(geom):
         return MultiPolygon([orient(p) for p in geom.geoms])
     else:
         return geom
-
-
+# Fill ids from next id (for inserts)
 def fill_column_with_increment(df, column_name, start_number):
     df = df.copy()  # Avoid modifying original
     mask = df[column_name].isnull()
     num_nulls = mask.sum()
     df.loc[mask, column_name] = range(start_number, start_number + num_nulls)
     return df
-
-
+# Fix related port and anch fields
 def fix_anch_relations(gdf):
     all_related_zone_ids = list(set(list(gdf[['related_zone_port_id']].dropna()['related_zone_port_id']) + list(gdf[['related_zone_anch_id']].dropna()['related_zone_anch_id'])))
     zone_ids_in_ports = list(gdf['zone_id'])
@@ -89,8 +79,7 @@ def fix_anch_relations(gdf):
         # map related_zone_port_id to port_id → this gives related_port_id
         gdf['related_port_id'] = gdf['related_zone_port_id'].map(zone_port_map)
         return gdf
-
-
+# fix port_id of terminals
 def fix_terminal_relations(gdf):
     all_related_zone_ids = list(set(list(gdf[['port_zone_id']].dropna()['port_zone_id'])))
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
@@ -103,8 +92,7 @@ def fix_terminal_relations(gdf):
         # map port_id of terminals
         gdf['port_id'] = gdf['port_zone_id'].map(zone_port_map)
         return gdf
-
-
+# fix port_id and terminal_id of berths
 def fix_berth_relations(gdf):
     all_related_zone_ids = list(set(list(gdf[['port_zone_id']].dropna()['port_zone_id'])))
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
@@ -131,8 +119,7 @@ def fix_berth_relations(gdf):
         )
         gdf['terminal_id'] = gdf['terminal_zone_id'].map(zone_terminal_map)
     return gdf
-
-
+# fix port_id of altnames
 def fix_altnames_relations(gdf):
     all_related_zone_ids = list(set(list(gdf[['port_zone_id']].dropna()['port_zone_id'])))
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
@@ -146,10 +133,8 @@ def fix_altnames_relations(gdf):
         gdf['port_id'] = gdf['port_zone_id'].map(zone_port_map)
         return gdf
 
-
-# +
-# Functions: Read and prepare PG tables
-
+# PG reads
+# PG ports
 def read_PG_ports(port_list = None):
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
@@ -191,7 +176,7 @@ def read_PG_ports(port_list = None):
     # geometry orientation
     gdf['polygon'] = gdf['polygon'].apply(lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
     # new mt port_ids
-    gdf = fill_column_with_increment(gdf, 'port_id', next_port_id)
+    gdf = fill_column_with_increment(gdf, 'port_id', next_ids['dbo.ports'])
     # relations
     gdf = fix_anch_relations(gdf)
     #float rounding
@@ -222,8 +207,7 @@ def read_PG_ports(port_list = None):
         raise ValueError("Port type has null")
     print(len(gdf), "PG ports read")
     return gdf.reset_index(drop=True)
-
-
+# PG terminals
 def read_PG_terminals(port_list = None):
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
@@ -258,7 +242,7 @@ def read_PG_terminals(port_list = None):
     df = fix_terminal_relations(df)
     # fill new mt terminal_ids
     df = df.sort_values('port_id')
-    df = fill_column_with_increment(df, 'terminal_id', next_terminal_id)
+    df = fill_column_with_increment(df, 'terminal_id', next_ids['dbo.port_terminals'])
     # fix string lengths
     df['terminal_name'] = df['terminal_name'].str[:50]
     # dtypes
@@ -266,8 +250,7 @@ def read_PG_terminals(port_list = None):
     df['port_id'] = df['port_id'].astype('int64')
     print(len(df), "PG terminals read")
     return df.reset_index(drop=True)
-
-
+#PG berths
 def read_PG_berths(port_list = None):
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
@@ -303,7 +286,7 @@ def read_PG_berths(port_list = None):
     gdf = fix_berth_relations(gdf)
     # new mt berth_ids
     gdf = gdf.sort_values(['port_id', 'terminal_id'])
-    gdf = fill_column_with_increment(gdf, 'berth_id', next_berth_id)
+    gdf = fill_column_with_increment(gdf, 'berth_id', next_ids['dbo.port_berths'])
     # string lengths
     gdf['berth_name'] = gdf['berth_name'].str[:30]
     # dtypes
@@ -312,8 +295,7 @@ def read_PG_berths(port_list = None):
     gdf['port_id'] = gdf['port_id'].astype('Int64')
     print(len(gdf), "PG berths read")
     return gdf.reset_index(drop=True)
-
-
+# PG altnames
 def read_PG_altnames(port_list = None):
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
@@ -340,10 +322,8 @@ def read_PG_altnames(port_list = None):
     print(len(df), "PG alt-names read")
     return df.reset_index(drop=True)
 
-
-# +
-# Functions: Read and prepare MT tables
-
+# MT reads
+# next id
 def get_next_identity(conn, table_name):
     query = f"""
     SELECT IDENT_CURRENT('{table_name}') + IDENT_INCR('{table_name}') AS next_identity;
@@ -352,8 +332,7 @@ def get_next_identity(conn, table_name):
     cursor.execute(query)
     row = cursor.fetchone()
     return int(row[0]) if row and row[0] is not None else 1
-
-        
+# MT ports
 def read_mt_ports():
     mt_port_ids = list(gdf_PG_ports[['port_id']].dropna()['port_id'].astype('Int64'))
     if len(mt_port_ids) == 0:
@@ -385,8 +364,7 @@ def read_mt_ports():
     gdf['related_port_id'] = gdf['related_port_id'].astype('Int64')
     print(len(gdf), "MT ports read")
     return gdf
-
-
+#MT altnames
 def read_mt_r_port_altnames():
     mt_port_ids = list(gdf_PG_ports[['port_id']].dropna()['port_id'].astype('Int64'))
     if len(mt_port_ids) == 0:
@@ -401,8 +379,7 @@ def read_mt_r_port_altnames():
     df = pd.read_sql_query(query, sql_conn)
     print(len(df), "MT r_altnames read")
     return df
-
-
+#MT terminals
 def read_mt_terminals():
     # comma seperated port_ids 
     mt_port_ids = list(gdf_PG_ports[['port_id']].dropna()['port_id'].astype('Int64'))
@@ -431,11 +408,8 @@ def read_mt_terminals():
     df['port_id'] = df['port_id'].astype('Int64')
     print(len(df), "MT terminals read")
     return df
-
-
 #Pending: read MT smdg
-
-
+#MT berths
 def read_mt_berths():
     # comma seperated port_ids 
     mt_port_ids = list(gdf_PG_ports[['port_id']].dropna()['port_id'].astype('Int64'))
@@ -475,68 +449,7 @@ def read_mt_berths():
     print(len(gdf), "MT berths read")
     return gdf
 
-
-# +
-import pandas as pd
-import geopandas as gpd
-from shapely.geometry.base import BaseGeometry
-from shapely.wkt import dumps as wkt_dumps
-
-def filter_changed_rows(df1, df2, decimals=4, geom_precision=6):
-    """
-    return rows from df1 that are NOT present in df2 (full-row compare),
-    allowing tiny float differences by rounding to `decimals`.
-    """
-    shared_cols = df1.columns.tolist()
-
-    # keep order + reset index for positional mask later
-    df1c = df1[shared_cols].copy().reset_index(drop=True)
-    df2c = df2[shared_cols].copy().reset_index(drop=True)
-
-    # --- round float columns to be tolerant at the 6th decimal ---
-    float_cols = [c for c in shared_cols
-                  if (c in df1c and pd.api.types.is_float_dtype(df1c[c])) or
-                     (c in df2c and pd.api.types.is_float_dtype(df2c[c]))]
-    if float_cols:
-        print(df1c[float_cols])
-        print(df2c[float_cols])
-        df1c[float_cols] = df1c[float_cols].round(decimals)
-        df2c[float_cols] = df2c[float_cols].round(decimals)
-
-    # geometry -> wkt (stable compare)
-    for c in shared_cols:
-        if df1c[c].apply(lambda x: isinstance(x, BaseGeometry)).any() \
-           or df2c[c].apply(lambda x: isinstance(x, BaseGeometry)).any():
-            df1c[c] = df1c[c].apply(lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
-                               if isinstance(g, BaseGeometry) else g)
-            df2c[c] = df2c[c].apply(lambda g: wkt_dumps(g, rounding_precision=geom_precision, trim=True)
-                               if isinstance(g, BaseGeometry) else g)
-
-    # treat nan==nan
-    df1c = df1c.where(pd.notnull(df1c), None)
-    df2c = df2c.where(pd.notnull(df2c), None)
-
-    # anti-join
-    merged = pd.merge(
-        df1c,
-        df2c.drop_duplicates(),
-        on=shared_cols,
-        how='left',
-        indicator=True
-    )
-
-    # positional mask avoids index alignment issues
-    mask = (merged['_merge'] == 'left_only').to_numpy()
-    return df1.iloc[mask]
-
-
-# +
-import pandas as pd
-import numpy as np
-from shapely.geometry.base import BaseGeometry
-from shapely.wkt import dumps as wkt_dumps
-from pandas.util import hash_pandas_object
-
+# Function to remove from update if there is nothing different
 def filter_changed_rows(df1, df2, decimals=3, geom_precision=6):
     """
     Return rows from df1 that are NOT present in df2 (full-row compare),
@@ -612,10 +525,8 @@ def filter_changed_rows(df1, df2, decimals=3, geom_precision=6):
     # 5) Return original (un-normalized) rows from df1 where no match was found
     return df1.iloc[mask].copy()
 
-
-# +
 # Functions: Split/prepare dataframes per handling type
-    
+# To insert
 def create_df_to_insert(df_new, df_existing, index_col=None):
     # take only the columns from df_existing, same order
     df_new = df_new[df_existing.columns]
@@ -642,8 +553,7 @@ def create_df_to_insert(df_new, df_existing, index_col=None):
     # keep only rows not already in existing
     mask = ~idx_new.isin(idx_existing)
     return df_new[mask].reset_index(drop=True)
-
-
+# to update
 def create_df_to_update(df_new, df_existing, index_col):
     if len(df_existing) == 0:
         return df_new.head(0)
@@ -654,8 +564,7 @@ def create_df_to_update(df_new, df_existing, index_col):
     # keep only rows where there is something different per index
     df = filter_changed_rows(df, df_existing)
     return df.reset_index(drop=True)
-
-
+# to delete
 def create_df_to_delete(df_new, df_existing, index_col=None):
     # use only existing's columns (same order)
     out_cols = list(df_existing.columns)
@@ -687,11 +596,7 @@ def create_df_to_delete(df_new, df_existing, index_col=None):
     mask = ~idx_existing.isin(idx_new)
     return df_existing.loc[mask, out_cols].reset_index(drop=True)
 
-
-
-# +
 #SQL builders
-
 # helper to format SQL-safe values
 def sql_format(val):
     try:
@@ -705,7 +610,6 @@ def sql_format(val):
             return str(val)
     except Exception:
         return 'null'
-
 # safe detection of geometry columns
 def detect_geom_cols(df):
     if df.empty:
@@ -714,7 +618,6 @@ def detect_geom_cols(df):
         col for col in df.columns
         if any(isinstance(v, BaseGeometry) for v in df[col].dropna())
     ]
-
 # generate UPDATE statements as a string
 def generate_update_sql(df, id_col, target_table):
     if len(df)==0:
@@ -734,7 +637,6 @@ def generate_update_sql(df, id_col, target_table):
         sql_lines.append(update_sql)
 
     return '\n'.join(sql_lines)
-
 # generate INSERT statements as a string
 def generate_insert_sql(df, target_table, identity_insert=False):
     if len(df) == 0:
@@ -758,7 +660,6 @@ def generate_insert_sql(df, target_table, identity_insert=False):
         sql_lines.append(f"SET IDENTITY_INSERT {target_table} OFF;")
 
     return '\n'.join(sql_lines)
-
 # generate DELETE statements as a string
 def generate_delete_sql(df, target_table, where_cols=None):
     """
@@ -791,133 +692,110 @@ def generate_delete_sql(df, target_table, where_cols=None):
         sql_lines.append(f"DELETE FROM {target_table} WHERE {where_clause};")
 
     return "\n".join(sql_lines)
-
-
 # combine multiple SQL parts with clear separation
 def combine_sql_blocks(*blocks):
     return '\n\n'.join(block.strip() for block in blocks if block.strip())
 
 
-# +
-#######################################
-# Call functions
-#######################################
+# Inputs
 
-# +
-# Input: next ids source
-
+# 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
+next_ids = {}
 # From dbdev
-# next_port_id = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.ports')
-# next_terminal_id = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_terminals')
-# next_berth_id = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_berths')
-
+next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.ports')
+next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_terminals')
+next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_berths')
 # From dbprim03
-#next_port_id = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.ports')
-#next_terminal_id = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_terminals')
-#next_berth_id = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
-
+#next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.ports')
+#next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_terminals')
+#next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
 # From manual input
-next_port_id = 26495
-next_terminal_id = 4996
-next_berth_id = 33412
+next_ids = {'dbo.ports':26495, 'dbo.port_terminals':5041, 'dbo.port_berths':33460}
+print(next_ids)
 
-print('Next port id:', next_port_id)
-print('Next terminal id:', next_terminal_id)
-print('Next berth id:', next_berth_id)
 
-# +
-# Input: zone_id list of port level geometries to read from PG (include related anch/ports, error will be raised if something missing)
-
+# 2. Decide MT server to read and compare tables from (no edit access needed)
 # --- Connect to SQL Server ---
-# dbdev_conn_str or dbprim03_conn_str
+# dbdev_conn_str / dbprim03_conn_str
 sql_conn = pyodbc.connect(dbdev_conn_str) 
 sql_cur = sql_conn.cursor()
 
-port_zone_id_list = [181811, 178573, 195703, 166252, 200843, 186619, 186378, 187612, 195513, 195372, 186379]
-port_zone_id_list = [1,17]
+# 3. Provide port list (must include related ports/anchs) to read and clean from PG and MT
+port_zone_id_list = [1913, 17251]
 
+# Run
+
+# Reads PG and MT tables -> Clean (increment ids / fill / fix all fields)
 #Ports
 gdf_PG_ports = read_PG_ports(port_list = port_zone_id_list)
 gdf_MT_ports = read_mt_ports()
-
 #Terminals
 df_PG_terminals = read_PG_terminals(port_list = port_zone_id_list)
 df_PG_terminals_basic = df_PG_terminals[['terminal_id', 'terminal_name', 'port_id']]
 df_MT_terminals_basic = read_mt_terminals()
-
-#Pending
+#Pending: SMDG
 #df_PG_terminals_smdg = df_PG_terminals[[.............]]
 #df_MT_smdg
-
 #Berths
 gdf_PG_berths = read_PG_berths(port_list = port_zone_id_list) 
 gdf_MT_berths = read_mt_berths() 
-
 #ALt names
 df_PG_alt_names = read_PG_altnames(port_list = port_zone_id_list) 
 df_MT_alt_names = read_mt_r_port_altnames()
 
-# +
-# Split/prepare dataframes per handling type
 
+# Split/prepare dataframes per handling type
+#Ports
 gdf_ports_to_insert = create_df_to_insert(gdf_PG_ports, gdf_MT_ports, 'port_id')
 gdf_ports_to_update = create_df_to_update(gdf_PG_ports, gdf_MT_ports, 'port_id')
 gdf_ports_to_delete = create_df_to_delete(gdf_PG_ports, gdf_MT_ports, 'port_id')
-
+#Terminals
 df_terminals_basic_to_insert = create_df_to_insert(df_PG_terminals_basic, df_MT_terminals_basic, 'terminal_id')
 df_terminals_basic_to_update = create_df_to_update(df_PG_terminals_basic, df_MT_terminals_basic, 'terminal_id')
 df_terminals_basic_to_delete = create_df_to_delete(df_PG_terminals_basic, df_MT_terminals_basic, 'terminal_id')
-
-#Pending
-#df_terminals_smdg_to_update
-
+#Pending: SMDG
+#Berths
 gdf_berths_to_insert = create_df_to_insert(gdf_PG_berths, gdf_MT_berths, 'berth_id')
 gdf_berths_to_update = create_df_to_update(gdf_PG_berths, gdf_MT_berths, 'berth_id')
 gdf_berths_to_delete = create_df_to_delete(gdf_PG_berths, gdf_MT_berths, 'berth_id')
-
+#Alt-names
 df_alt_names_to_insert = create_df_to_insert(df_PG_alt_names, df_MT_alt_names)
 df_alt_names_to_delete = create_df_to_delete(df_PG_alt_names, df_MT_alt_names)
-# -
-
+print('To insert counts:')
+print(len(gdf_ports_to_insert), 'ports')
+print(len(df_alt_names_to_insert), 'alt-names')
+print(len(df_terminals_basic_to_insert), 'terminals')
+print(len(gdf_berths_to_insert), 'berths')
+print('')
+print('To update counts:')
+print(len(gdf_ports_to_update), 'ports')
+print(len(df_terminals_basic_to_update), 'terminals')
+print(len(gdf_berths_to_update), 'berths')
+print('')
 print('To delete counts:')
 print(len(gdf_ports_to_delete), 'ports')
+print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
-# +
+
 # sql parts and combine
 
-# check_next_id 
+# Pending? check_next_id 
 port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
 terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS', identity_insert=True)
 terminal_updates = generate_update_sql(df_terminals_basic_to_update, 'terminal_id', 'dbo.PORT_TERMINALS')
 # Pending: smgd updates/insderts/deletes
-
 berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS', identity_insert=True)
 berth_updates = generate_update_sql(gdf_berths_to_update, 'berth_id', 'dbo.PORT_BERTHS')
 r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES', identity_insert=False) 
 r_altnames_deletes =  generate_delete_sql(df_alt_names_to_delete, 'dbo.R_PORT_ALTNAMES') 
-
-#ports_noted_to_del
-#terminals_noted_to_del (is it necessary?)
-#berths_noted_to_del
-
-    
+# Pending deletions ((or enable=False?) of ports, terminal, berths. Mark to merge events before deletion?
 final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
-
 #write to file
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
-
 print(final_sql)
-
-# -
-
-
-
-
-
-
 
 
