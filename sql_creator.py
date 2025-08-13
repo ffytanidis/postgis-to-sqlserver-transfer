@@ -47,10 +47,9 @@ sql_conn = pyodbc.connect(dbprim03_conn_str)
 sql_cur = sql_conn.cursor()
 
 # Create functions
-
 # Fix functions
 # Ensure correct ring orientation for polygons and multipolygons
-def correct_orientchation(geom):
+def correct_orientation(geom):
     if isinstance(geom, Polygon):
         return orient(geom)
     elif isinstance(geom, MultiPolygon):
@@ -698,33 +697,31 @@ def combine_sql_blocks(*blocks):
 
 
 # Inputs
-
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 next_ids = {}
 # From dbdev
-next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.ports')
-next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_terminals')
-next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_berths')
+# next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.ports')
+# next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_terminals')
+# next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_berths')
 # From dbprim03
-#next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.ports')
-#next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_terminals')
-#next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
+next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.ports')
+next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_terminals')
+next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
 # From manual input
-next_ids = {'dbo.ports':26495, 'dbo.port_terminals':5041, 'dbo.port_berths':33460}
+#next_ids = {'dbo.ports':26495, 'dbo.port_terminals':5041, 'dbo.port_berths':33460}
 print(next_ids)
 
 
 # 2. Decide MT server to read and compare tables from (no edit access needed)
 # --- Connect to SQL Server ---
 # dbdev_conn_str / dbprim03_conn_str
-sql_conn = pyodbc.connect(dbdev_conn_str) 
+sql_conn = pyodbc.connect(dbprim03_conn_str) 
 sql_cur = sql_conn.cursor()
 
 # 3. Provide port list (must include related ports/anchs) to read and clean from PG and MT
-port_zone_id_list = [1913, 17251]
+port_zone_id_list = [1913, 17251, 1, 17]
 
 # Run
-
 # Reads PG and MT tables -> Clean (increment ids / fill / fix all fields)
 #Ports
 gdf_PG_ports = read_PG_ports(port_list = port_zone_id_list)
@@ -779,8 +776,11 @@ print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
 
-# sql parts and combine
+gdf_berths_to_delete
 
+
+
+# sql parts and combine
 # Pending? check_next_id 
 port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
@@ -797,5 +797,3 @@ final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, ter
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
 print(final_sql)
-
-
