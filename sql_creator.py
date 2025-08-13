@@ -797,3 +797,5 @@ final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, ter
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
 print(final_sql)
+
+
