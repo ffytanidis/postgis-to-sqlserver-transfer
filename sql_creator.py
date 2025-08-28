@@ -69,7 +69,7 @@ def fix_anch_relations(gdf):
     zone_ids_in_ports = list(gdf['zone_id'])
     related_zone_ids_not_existing = list(set(all_related_zone_ids)-set(zone_ids_in_ports))
     if len(related_zone_ids_not_existing)>0:
-        raise ValueError(f"Zone IDs: [{', '.join(str(i) for i in related_zone_ids_not_existing)}] not found in lookup table. Add them in input port list.")
+        raise ValueError(f"Zone IDs: [{', '.join(str(int(i)) for i in related_zone_ids_not_existing)}] not found in lookup table. Add them in input port list.")
     else:
         # set index to zone_id for quick lookup
         zone_port_map = gdf.set_index('zone_id')['port_id']
@@ -84,7 +84,7 @@ def fix_terminal_relations(gdf):
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
     related_zone_ids_not_existing = list(set(all_related_zone_ids)-set(zone_ids_in_ports))
     if len(related_zone_ids_not_existing)>0:
-        raise ValueError(f"Zone IDs: [{', '.join(str(i) for i in related_zone_ids_not_existing)}] not found in lookup table.")
+        raise ValueError(f"Zone IDs: [{', '.join(str(int(i)) for i in related_zone_ids_not_existing)}] not found in lookup table.")
     else:
         # set index to zone_id for quick lookup
         zone_port_map = gdf_PG_ports.set_index('zone_id')['port_id']
@@ -97,7 +97,7 @@ def fix_berth_relations(gdf):
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
     related_zone_ids_not_existing = list(set(all_related_zone_ids)-set(zone_ids_in_ports))
     if len(related_zone_ids_not_existing)>0:
-        raise ValueError(f"Zone IDs: [{', '.join(str(i) for i in related_zone_ids_not_existing)}] not found in PG ports table.")
+        raise ValueError(f"Zone IDs: [{', '.join(str(int(i)) for i in related_zone_ids_not_existing)}] not found in PG ports table.")
     else:
         # set index to zone_id for quick lookup
         zone_port_map = gdf_PG_ports.set_index('zone_id')['port_id']
@@ -108,7 +108,7 @@ def fix_berth_relations(gdf):
     zone_ids_in_terminals = list(df_PG_terminals['zone_id'])
     related_zone_ids_not_existing = list(set(all_related_zone_ids)-set(zone_ids_in_terminals))
     if len(related_zone_ids_not_existing)>0:
-        raise ValueError(f"Zone IDs: [{', '.join(str(i) for i in related_zone_ids_not_existing)}] not found in PG terminal table.")
+        raise ValueError(f"Zone IDs: [{', '.join(str(int(i)) for i in related_zone_ids_not_existing)}] not found in PG terminal table.")
     else:
         # set index to zone_id for quick lookup
         zone_terminal_map = (
@@ -124,7 +124,7 @@ def fix_altnames_relations(gdf):
     zone_ids_in_ports = list(gdf_PG_ports['zone_id'])
     related_zone_ids_not_existing = list(set(all_related_zone_ids)-set(zone_ids_in_ports))
     if len(related_zone_ids_not_existing)>0:
-        raise ValueError(f"Zone IDs: [{', '.join(str(i) for i in related_zone_ids_not_existing)}] not found in lookup table.")
+        raise ValueError(f"Zone IDs: [{', '.join(str(int(i)) for i in related_zone_ids_not_existing)}] not found in lookup table.")
     else:
         # set index to zone_id for quick lookup
         zone_port_map = gdf_PG_ports.set_index('zone_id')['port_id']
@@ -152,8 +152,8 @@ def read_PG_ports(port_list = None):
         zone_type,
         unlocode,
         country_code,
-        timezone_name,
-        dst_id,
+        timezone_name as timezone,
+        dst_id as dst,
         enable_calls,
         confirmed,
         "CENTERX" - 0.00045 as sw_x,
@@ -344,6 +344,8 @@ def read_mt_ports():
         p.port_name, 
         p.port_type,
         p.country_code,
+        p.timezone, 
+        p.dst,
         p.unlocode,
         p.related_anch_id, 
         p.related_port_id, 
@@ -371,9 +373,11 @@ def read_mt_r_port_altnames():
     else:
         id_str = ', '.join(str(i) for i in mt_port_ids)
     query = f"""
-    select *
-    from dbo.R_PORT_ALTNAMES
-    where port_id in ({id_str})
+    select am.*
+    from dbo.R_PORT_ALTNAMES am
+    join ais.dbo.PORTS p on p.port_id = am.port_id
+    where p.PORT_NAME <> am.alias_name 
+    and am.port_id in ({id_str})
     """
     df = pd.read_sql_query(query, sql_conn)
     print(len(df), "MT r_altnames read")
@@ -696,30 +700,95 @@ def combine_sql_blocks(*blocks):
     return '\n\n'.join(block.strip() for block in blocks if block.strip())
 
 
+# Create log table
+def log_dataset(write=True, write_no_diff=True, comments=None):
+    # PORTS
+    #insert and update from PG + delete from 
+    df_log_ports = pd.concat([gdf_PG_ports[['port_id','port_name', 'zone_id', 'port_type', 'zone_type']],
+                             gdf_ports_to_delete[['port_id','port_name', 'port_type']]])
+    # rename cols
+    df_log_ports = df_log_ports.rename(columns={'port_id':'mt_id', 'port_name':'name', 'port_type':'mt_type'})
+    #add columns of instance and comments
+    df_log_ports['target_instance'] = instance
+    df_log_ports['mt_table'] = 'ports'
+    if comments:
+        df_log_ports['comments'] = comments
+    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_insert['port_id']), 'statement'] = 'insert'
+    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_update['port_id']), 'statement'] = 'update'
+    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_delete['port_id']), 'statement'] = 'delete'
+    df_log_ports['statement'] = df_log_ports['statement'].fillna('no diff')
+    # TERMINALS
+    #insert and update from PG + delete from 
+    df_log_terminals = pd.concat([df_PG_terminals[['terminal_id', 'terminal_name', 'zone_id', 'zone_type']],
+                             df_terminals_basic_to_delete[['terminal_id', 'terminal_name']]])
+    # rename cols
+    df_log_terminals = df_log_terminals.rename(columns={'terminal_id':'mt_id', 'terminal_name':'name'})
+    #add columns of instance and comments
+    df_log_terminals['target_instance'] = instance
+    df_log_terminals['mt_table'] = 'port_terminals'
+    if comments:
+        df_log_terminals['comments'] = comments
+    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_insert['terminal_id']), 'statement'] = 'insert'
+    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_update['terminal_id']), 'statement'] = 'update'
+    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_delete['terminal_id']), 'statement'] = 'delete'
+    df_log_terminals['statement'] = df_log_terminals['statement'].fillna('no diff')
+    # BERTHS
+    #insert and update from PG + delete from 
+    df_log_berths = pd.concat([gdf_PG_berths[['berth_id','berth_name', 'zone_id', 'zone_type']],
+                             gdf_berths_to_delete[['berth_id','berth_name']]])
+    # rename cols
+    df_log_berths = df_log_berths.rename(columns={'berth_id':'mt_id', 'berth_name':'name', 'berth_type':'mt_type'})
+    #add columns of instance and comments
+    df_log_berths['target_instance'] = instance
+    df_log_berths['mt_table'] = 'berths'
+    df_log_berths['mt_type'] = 'berth'
+    if comments:
+        df_log_berths['comments'] = comments
+    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_insert['berth_id']), 'statement'] = 'insert'
+    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_update['berth_id']), 'statement'] = 'update'
+    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_delete['berth_id']), 'statement'] = 'delete'
+    df_log_berths['statement'] = df_log_berths['statement'].fillna('no diff')
+    # COMBINE
+    df_log_combined = pd.concat([df_log_ports, df_log_terminals, df_log_berths])
+    if write == True:
+        df_log_to_upload = df_log_combined
+        if write_no_diff == False:
+            df_log_to_upload = df_log_combined[df_log_combined['statement']!='no diff']
+        df_log_to_upload.to_sql(
+            name="mt_transfer_log",    # table name
+            con=pg_engine,             # sqlalchemy engine
+            schema="sandbox",          # target schema
+            if_exists="append",        # append to existing table
+            index=False                # don't write the index as a column
+        )
+    return df_log_combined
+
+
 # Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
+# dbdev / dbprim03
+instance = 'dbdev'
+# Establish connection and get next ids
 next_ids = {}
-# From dbdev
-# next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.ports')
-# next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_terminals')
-# next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbdev_conn_str), 'dbo.port_berths')
-# From dbprim03
-next_ids['dbo.ports'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.ports')
-next_ids['dbo.port_terminals'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_terminals')
-next_ids['dbo.port_berths'] = get_next_identity(pyodbc.connect(dbprim03_conn_str), 'dbo.port_berths')
-# From manual input
-#next_ids = {'dbo.ports':26495, 'dbo.port_terminals':5041, 'dbo.port_berths':33460}
+if instance == 'dbdev':
+    selected_conn = dbdev_conn_str
+elif instance == 'dbprim03':
+    selected_conn = dbprim03_conn_str
+else:
+    raise ValueError('Input instance not valid')
+sql_conn = pyodbc.connect(selected_conn) 
+sql_cur = sql_conn.cursor()
+next_ids['dbo.ports'] = get_next_identity(sql_conn, 'dbo.ports')
+next_ids['dbo.port_terminals'] = get_next_identity(sql_conn, 'dbo.port_terminals')
+next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
+# Optional: overwrite with manual input
+# next_ids = {'dbo.ports':26489, 'dbo.port_terminals':4938, 'dbo.port_berths':33332}
+print(instance)
 print(next_ids)
 
 
-# 2. Decide MT server to read and compare tables from (no edit access needed)
-# --- Connect to SQL Server ---
-# dbdev_conn_str / dbprim03_conn_str
-sql_conn = pyodbc.connect(dbprim03_conn_str) 
-sql_cur = sql_conn.cursor()
-
-# 3. Provide port list (must include related ports/anchs) to read and clean from PG and MT
-port_zone_id_list = [1913, 17251, 1, 17]
+port_zone_id_list = [183122, 181285, 175339, 196698, 185812, 185266, 197561, 180770, 200443, 186648, 183402, 195439, 183450, 182200, 182503, 181785, 186583, 184138, 196689, 179, 17306, 196706, 197562, 196690, 196143]
+print('Port list count:', len(port_zone_id_list))
 
 # Run
 # Reads PG and MT tables -> Clean (increment ids / fill / fix all fields)
@@ -776,9 +845,10 @@ print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
 
-gdf_berths_to_delete
 
-
+# handle log
+df_log = log_dataset(write=False, write_no_diff=True, comments=None)
+df_log
 
 # sql parts and combine
 # Pending? check_next_id 
@@ -797,5 +867,7 @@ final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, ter
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
 print(final_sql)
+
+
 
 
