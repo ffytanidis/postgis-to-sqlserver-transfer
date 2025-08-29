@@ -726,6 +726,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     #add columns of instance and comments
     df_log_terminals['target_instance'] = instance
     df_log_terminals['mt_table'] = 'port_terminals'
+    df_log_terminals['mt_type'] = 'terminal'
     if comments:
         df_log_terminals['comments'] = comments
     df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_insert['terminal_id']), 'statement'] = 'insert'
@@ -750,6 +751,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     df_log_berths['statement'] = df_log_berths['statement'].fillna('no diff')
     # COMBINE
     df_log_combined = pd.concat([df_log_ports, df_log_terminals, df_log_berths])
+    df_log_combined['zone_id'] = df_log_combined['zone_id'].astype('Int64')
     if write == True:
         df_log_to_upload = df_log_combined
         if write_no_diff == False:
@@ -767,7 +769,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
 # Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 # dbdev / dbprim03
-instance = 'dbdev'
+instance = 'dbprim03'
 # Establish connection and get next ids
 next_ids = {}
 if instance == 'dbdev':
@@ -782,7 +784,7 @@ next_ids['dbo.ports'] = get_next_identity(sql_conn, 'dbo.ports')
 next_ids['dbo.port_terminals'] = get_next_identity(sql_conn, 'dbo.port_terminals')
 next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
 # Optional: overwrite with manual input
-# next_ids = {'dbo.ports':26489, 'dbo.port_terminals':4938, 'dbo.port_berths':33332}
+# next_ids = {'dbo.ports':26502, 'dbo.port_terminals':4948, 'dbo.port_berths':33360}
 print(instance)
 print(next_ids)
 
@@ -844,11 +846,9 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
-
-
 # handle log
 df_log = log_dataset(write=False, write_no_diff=True, comments=None)
-df_log
+df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 
 # sql parts and combine
 # Pending? check_next_id 
@@ -866,8 +866,10 @@ final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, ter
 #write to file
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
-print(final_sql)
+print('Output characters:', len(final_sql))
 
-
+# +
+# pg_engine.dispose()
+# -
 
 
