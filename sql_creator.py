@@ -184,11 +184,19 @@ def read_PG_ports(port_list = None):
     gdf['ne_x'] = gdf['ne_x'].round(6)
     gdf['ne_y'] = gdf['ne_y'].round(6)
     # string lengths
-    gdf['port_name'] = gdf['port_name'].str[:20]
-    gdf['altname1'] = gdf['altname1'].str[:20]
-    gdf['altname2'] = gdf['altname2'].str[:20]
-    gdf['altname3'] = gdf['altname3'].str[:20]
-    gdf['altname4'] = gdf['altname4'].str[:20]
+    def trim_port_name(name):
+        if not isinstance(name, str):
+            return name  # skip non-strings or NaNs
+        if len(name) > 20 and name.endswith(" PORT"):
+            name = name[:-5]  # remove ' PORT'
+        return name[:20]  # trim to max 20 chars
+    
+    # apply it to the column
+    gdf['port_name'] = gdf['port_name'].apply(trim_port_name)
+    gdf['altname1'] = gdf['altname1'].apply(trim_port_name)
+    gdf['altname2'] = gdf['altname2'].apply(trim_port_name)
+    gdf['altname3'] = gdf['altname3'].apply(trim_port_name)
+    gdf['altname4'] = gdf['altname4'].apply(trim_port_name)
     # dtypes
     gdf['port_id'] = gdf['port_id'].astype('int64')
     gdf['related_anch_id'] = gdf['related_anch_id'].astype('Int64')
@@ -849,6 +857,8 @@ print(len(gdf_berths_to_delete), 'berths')
 # handle log
 df_log = log_dataset(write=False, write_no_diff=True, comments=None)
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
+
+gdf_PG_ports
 
 # sql parts and combine
 # Pending? check_next_id 
