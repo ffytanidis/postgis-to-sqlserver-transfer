@@ -156,10 +156,10 @@ def read_PG_ports(port_list = None):
         dst_id as dst,
         enable_calls,
         confirmed,
-        "CENTERY" - greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))) as sw_y,
-        "CENTERX" - greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))) as sw_x,
-        "CENTERY" + greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))) as ne_y,
-        "CENTERX" + greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))) as ne_x,
+        round(("CENTERY" - greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))))::numeric, 5) as sw_y,
+        round(("CENTERX" - greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))))::numeric, 5) as sw_x,
+        round(("CENTERY" + greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))))::numeric, 5) as ne_y,
+        round(("CENTERX" + greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))))::numeric, 5) as ne_x,
         alternative_names,
         alternative_unlocodes,
         NULLIF(related_zone_anch_id[1], -1) AS related_zone_anch_id,
@@ -382,8 +382,7 @@ def read_mt_r_port_altnames():
     select am.*
     from dbo.R_PORT_ALTNAMES am
     join ais.dbo.PORTS p on p.port_id = am.port_id
-    where p.PORT_NAME <> am.alias_name 
-    and am.port_id in ({id_str})
+    where am.port_id in ({id_str})
     """
     df = pd.read_sql_query(query, sql_conn)
     print(len(df), "MT r_altnames read")
@@ -775,7 +774,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
 # Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 # dbdev / dbprim03
-instance = 'dbprim03'
+instance = 'dbdev'
 # Establish connection and get next ids
 next_ids = {}
 if instance == 'dbdev':
@@ -790,10 +789,13 @@ next_ids['dbo.ports'] = get_next_identity(sql_conn, 'dbo.ports')
 next_ids['dbo.port_terminals'] = get_next_identity(sql_conn, 'dbo.port_terminals')
 next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
 # Optional: overwrite with manual input
-# next_ids = {'dbo.ports':26502, 'dbo.port_terminals':4948, 'dbo.port_berths':33360}
+next_ids = {'dbo.ports':26513, 'dbo.port_terminals':4994, 'dbo.port_berths':33427}
 print(instance)
 print(next_ids)
 
+
+port_zone_id_list = [183122, 181285, 175339, 196698, 185812, 185266, 197561, 180770, 200443, 186648, 183402, 195439, 183450, 182200, 182503, 181785, 186583, 184138, 196689, 179, 17306, 196706, 197562, 196690, 196143]
+print('Port list count:', len(port_zone_id_list))
 
 port_zone_id_list = [183122, 181285, 175339, 196698, 185812, 185266, 197561, 180770, 200443, 186648, 183402, 195439, 183450, 182200, 182503, 181785, 186583, 184138, 196689, 179, 17306, 196706, 197562, 196690, 196143]
 print('Port list count:', len(port_zone_id_list))
@@ -816,6 +818,9 @@ gdf_MT_berths = read_mt_berths()
 #ALt names
 df_PG_alt_names = read_PG_altnames(port_list = port_zone_id_list) 
 df_MT_alt_names = read_mt_r_port_altnames()
+# add port name to PG alt names
+df_alts_to_add = gdf_PG_ports[['zone_id', 'port_name', 'port_id']].rename(columns={'zone_id':'port_zone_id', 'port_name':'alias_name'})
+df_PG_alt_names = pd.concat([df_alts_to_add, df_PG_alt_names]).drop_duplicates().reset_index(drop=True)
 
 
 # Split/prepare dataframes per handling type
@@ -856,8 +861,6 @@ print(len(gdf_berths_to_delete), 'berths')
 df_log = log_dataset(write=False, write_no_diff=True, comments=None)
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 
-gdf_PG_ports[gdf_PG_ports['zone_id']==181285]
-
 # sql parts and combine
 # Pending? check_next_id 
 port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
@@ -879,5 +882,4 @@ print('Output characters:', len(final_sql))
 # +
 # pg_engine.dispose()
 # -
-
 
