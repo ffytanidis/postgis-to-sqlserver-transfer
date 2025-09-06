@@ -137,12 +137,12 @@ def fix_altnames_relations(gdf):
 def read_PG_ports(port_list = None):
     if isinstance(port_list, list):
         id_str = ', '.join(str(i) for i in port_list)
-        sql_where = f'zone_id in ({id_str})'
+        sql_where = f'mp.zone_id in ({id_str})'
     else:
         sql_where = '1=1'
     q = f"""
     SELECT
-        zone_id,
+        mp.zone_id,
         mt_id as port_id,
         name as port_name,
         (coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[1] as altname1,
@@ -162,10 +162,12 @@ def read_PG_ports(port_list = None):
         round(("CENTERX" + greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))))::numeric, 5) as ne_x,
         alternative_names,
         alternative_unlocodes,
-        NULLIF(related_zone_anch_id[1], -1) AS related_zone_anch_id,
-        NULLIF(related_zone_port_id[1], -1) AS related_zone_port_id,
+        ap.primary_related_zone_anch_id AS related_zone_anch_id,
+        ap.primary_related_zone_port_id AS related_zone_port_id,
         polygon_geom as polygon
-    FROM sandbox.mview_master_ports where {sql_where}
+    FROM sandbox.mview_master_ports mp
+    left join sandbox.v_port_anchorage_primary ap on ap.zone_id = mp.zone_id
+    where {sql_where}
     """
     gdf = gpd.read_postgis(
         sql=q,
@@ -789,16 +791,20 @@ next_ids['dbo.ports'] = get_next_identity(sql_conn, 'dbo.ports')
 next_ids['dbo.port_terminals'] = get_next_identity(sql_conn, 'dbo.port_terminals')
 next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
 # Optional: overwrite with manual input
-next_ids = {'dbo.ports':26513, 'dbo.port_terminals':4994, 'dbo.port_berths':33427}
+#next_ids = {'dbo.ports':26513, 'dbo.port_terminals':4994, 'dbo.port_berths':33427}
 print(instance)
 print(next_ids)
 
 
-port_zone_id_list = [183122, 181285, 175339, 196698, 185812, 185266, 197561, 180770, 200443, 186648, 183402, 195439, 183450, 182200, 182503, 181785, 186583, 184138, 196689, 179, 17306, 196706, 197562, 196690, 196143]
-print('Port list count:', len(port_zone_id_list))
+# +
+#100 new ports +2 anchs
+not_existing = []
+existing = [1,17]
 
-port_zone_id_list = [183122, 181285, 175339, 196698, 185812, 185266, 197561, 180770, 200443, 186648, 183402, 195439, 183450, 182200, 182503, 181785, 186583, 184138, 196689, 179, 17306, 196706, 197562, 196690, 196143]
+port_zone_id_list = not_existing + existing
+
 print('Port list count:', len(port_zone_id_list))
+# -
 
 # Run
 # Reads PG and MT tables -> Clean (increment ids / fill / fix all fields)
@@ -857,9 +863,28 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
+
+
+# +
+# check anch relations differences
+df1 = gdf_MT_ports[['port_id', 'port_type', 'related_anch_id', 'related_port_id']].rename(columns={'related_anch_id':'MT_rel_anch'})
+df2 = gdf_ports_to_update[['port_id', 'port_type', 'related_anch_id', 'related_port_id']]
+
+df_merged = df1.merge(df2, on='port_id')
+df_merged = df_merged.fillna(-1)
+
+df_merged[(df_merged['MT_rel_anch']!=df_merged['related_anch_id'])|(df_merged['related_port_id_x']!=df_merged['related_port_id_y'])]
+# -
+
+
+
 # handle log
-df_log = log_dataset(write=False, write_no_diff=True, comments=None)
+df_log = log_dataset(write=False, write_no_diff=True, comments='pending execution')
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
+
+df_log[df_log['mt_id']==21826]
+
+
 
 # sql parts and combine
 # Pending? check_next_id 
@@ -880,6 +905,6 @@ with open('sql_output.sql', 'w') as f:
 print('Output characters:', len(final_sql))
 
 # +
-# pg_engine.dispose()
+#pg_engine.dispose()
 # -
 
