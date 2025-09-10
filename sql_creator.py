@@ -191,6 +191,8 @@ def read_PG_ports(port_list = None):
             return name  # skip non-strings or NaNs
         if len(name) > 20 and name.endswith(" PORT"):
             name = name[:-5]  # remove ' PORT'
+        if len(name) > 20 and name.endswith(" ANCHORAGE"):
+            name = name[:-5]  # remove 'ORAGE'
         return name[:20]  # trim to max 20 chars
     gdf['port_name'] = gdf['port_name'].apply(trim_name)
     gdf['altname1'] = gdf['altname1'].apply(trim_name)
@@ -796,10 +798,13 @@ print(instance)
 print(next_ids)
 
 
+
+
 # +
 #100 new ports +2 anchs
 not_existing = []
-existing = [1,17]
+existing = [243, 13667, 89, 118, 1138, 13399, 13173, 156, 1324, 2403, 1372, 13741, 320, 120, 13717, 12426, 2634, 1325, 12478, 13823, 16876, 16839, 195681, 17131, 17643, 17135, 17168, 17081, 17365, 17270, 17143, 17883, 195321, 16763, 17084, 17021 ,1420, 12425, 16930]
+
 
 port_zone_id_list = not_existing + existing
 
@@ -863,28 +868,34 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
-
+df_terminals_basic_to_delete
 
 # +
 # check anch relations differences
-df1 = gdf_MT_ports[['port_id', 'port_type', 'related_anch_id', 'related_port_id']].rename(columns={'related_anch_id':'MT_rel_anch'})
-df2 = gdf_ports_to_update[['port_id', 'port_type', 'related_anch_id', 'related_port_id']]
+df1 = gdf_MT_ports[['port_id', 'port_name', 'port_type', 'related_anch_id', 'related_port_id']].rename(columns={'related_anch_id':'MT_rel_anch'})
+df2 = gdf_ports_to_update[['port_id', 'port_name', 'port_type', 'related_anch_id', 'related_port_id']]
 
 df_merged = df1.merge(df2, on='port_id')
 df_merged = df_merged.fillna(-1)
 
 df_merged[(df_merged['MT_rel_anch']!=df_merged['related_anch_id'])|(df_merged['related_port_id_x']!=df_merged['related_port_id_y'])]
+# +
+# check differences
+df1 = gdf_MT_ports
+df2 = gdf_ports_to_update
+
+df_merged = df1.merge(df2, on='port_id')
+df_merged = df_merged.fillna(-1)
+
+df_merged[df_merged['related_anch_id_x']!=df_merged['related_anch_id_y']][['port_id', 'port_name_x', 'related_anch_id_x', 'related_anch_id_y']]
 # -
+
 
 
 
 # handle log
 df_log = log_dataset(write=False, write_no_diff=True, comments='pending execution')
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
-
-df_log[df_log['mt_id']==21826]
-
-
 
 # sql parts and combine
 # Pending? check_next_id 
