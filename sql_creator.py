@@ -11,6 +11,7 @@ import numpy as np
 from shapely.geometry import Polygon, MultiPolygon
 from shapely.geometry.polygon import orient
 from shapely.wkt import dumps as wkt_dumps
+from datetime import datetime
 import math
 import warnings
 warnings.filterwarnings('ignore')
@@ -42,9 +43,6 @@ pg_url = (
     f"{pg_config['host']}:{pg_config['port']}/{pg_config['database']}"
 )
 pg_engine = create_engine(pg_url)
-# --- Connect to SQL Server ---
-sql_conn = pyodbc.connect(dbprim03_conn_str)
-sql_cur = sql_conn.cursor()
 
 # Create functions
 # Fix functions
@@ -704,6 +702,29 @@ def generate_delete_sql(df, target_table, where_cols=None):
         sql_lines.append(f"DELETE FROM {target_table} WHERE {where_clause};")
 
     return "\n".join(sql_lines)
+# Generate description in sql
+def generate_description_sql():
+    sql_lines =[]
+    sql_lines.append('/*')
+    sql_lines.append(f"Target instance: {instance}")
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+    sql_lines.append(f"Export Timestamp: {ts}")
+    sql_lines.append('')
+    sql_lines.append('Executed per table: SELECT IDENT_CURRENT(target_table) + IDENT_INCR(target_table)')
+    sql_lines.append(f"Returned: {next_ids}")
+    sql_lines.append('to be used as initial next id in calculations.')
+    sql_lines.append('')
+    sql_lines.append('Line counts per table and statement:')
+    sql_lines.append(f"ports inserts: {len(gdf_ports_to_insert)}")
+    sql_lines.append(f"ports updates: {len(gdf_ports_to_update)}")
+    sql_lines.append(f"port_terminals inserts: {len(df_terminals_basic_to_insert)}")
+    sql_lines.append(f"port_terminals updates: {len(df_terminals_basic_to_update)}")
+    sql_lines.append(f"port_berths inserts: {len(gdf_berths_to_insert)}")
+    sql_lines.append(f"port_berths updates: {len(gdf_berths_to_update)}")
+    sql_lines.append(f"r_port_altnames inserts: {len(df_alt_names_to_insert)}")
+    sql_lines.append(f"r_port_altnames delete: {len(df_alt_names_to_delete)}")
+    sql_lines.append('*/')
+    return "\n".join(sql_lines)
 # combine multiple SQL parts with clear separation
 def combine_sql_blocks(*blocks):
     return '\n\n'.join(block.strip() for block in blocks if block.strip())
@@ -778,7 +799,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
 # Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 # dbdev / dbprim03
-instance = 'dbdev'
+instance = 'dbprim03'
 # Establish connection and get next ids
 next_ids = {}
 if instance == 'dbdev':
@@ -798,12 +819,12 @@ print(instance)
 print(next_ids)
 
 
-
-
 # +
-#100 new ports +2 anchs
+# target ports
+
 not_existing = []
-existing = [243, 13667, 89, 118, 1138, 13399, 13173, 156, 1324, 2403, 1372, 13741, 320, 120, 13717, 12426, 2634, 1325, 12478, 13823, 16876, 16839, 195681, 17131, 17643, 17135, 17168, 17081, 17365, 17270, 17143, 17883, 195321, 16763, 17084, 17021 ,1420, 12425, 16930]
+
+existing = [243, 13667, 89, 118, 1138, 13399, 13173, 156, 1324, 2403, 1372, 13741, 320, 120, 13717, 12426, 2634, 1325, 12478, 13823, 16876, 16839, 195681, 17131, 17643, 17135, 17168, 17081, 17365, 17270, 17143, 17883, 195321, 16763, 17084, 17021 ,1420, 12425, 16930, 202907, 202805]
 
 
 port_zone_id_list = not_existing + existing
@@ -880,18 +901,15 @@ df_merged = df_merged.fillna(-1)
 
 df_merged[(df_merged['MT_rel_anch']!=df_merged['related_anch_id'])|(df_merged['related_port_id_x']!=df_merged['related_port_id_y'])]
 # +
-# check differences
+# check timezone differences
 df1 = gdf_MT_ports
 df2 = gdf_ports_to_update
 
 df_merged = df1.merge(df2, on='port_id')
 df_merged = df_merged.fillna(-1)
 
-df_merged[df_merged['related_anch_id_x']!=df_merged['related_anch_id_y']][['port_id', 'port_name_x', 'related_anch_id_x', 'related_anch_id_y']]
+df_merged[df_merged['timezone_x']!=df_merged['timezone_y']][['port_id', 'port_name_x', 'timezone_x', 'timezone_y']]
 # -
-
-
-
 
 # handle log
 df_log = log_dataset(write=False, write_no_diff=True, comments='pending execution')
@@ -899,17 +917,17 @@ df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 
 # sql parts and combine
 # Pending? check_next_id 
+description = generate_description_sql() 
 port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
 terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS', identity_insert=True)
 terminal_updates = generate_update_sql(df_terminals_basic_to_update, 'terminal_id', 'dbo.PORT_TERMINALS')
-# Pending: smgd updates/insderts/deletes
 berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS', identity_insert=True)
 berth_updates = generate_update_sql(gdf_berths_to_update, 'berth_id', 'dbo.PORT_BERTHS')
 r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES', identity_insert=False) 
 r_altnames_deletes =  generate_delete_sql(df_alt_names_to_delete, 'dbo.R_PORT_ALTNAMES') 
 # Pending deletions ((or enable=False?) of ports, terminal, berths. Mark to merge events before deletion?
-final_sql = combine_sql_blocks(port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
+final_sql = combine_sql_blocks(description, port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
 #write to file
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
@@ -917,5 +935,3 @@ print('Output characters:', len(final_sql))
 
 # +
 #pg_engine.dispose()
-# -
-
