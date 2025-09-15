@@ -719,6 +719,7 @@ def generate_description_sql():
     sql_lines.append(f"ports updates: {len(gdf_ports_to_update)}")
     sql_lines.append(f"port_terminals inserts: {len(df_terminals_basic_to_insert)}")
     sql_lines.append(f"port_terminals updates: {len(df_terminals_basic_to_update)}")
+    sql_lines.append(f"port_terminals deletes: {len(df_terminals_basic_to_delete)}")
     sql_lines.append(f"port_berths inserts: {len(gdf_berths_to_insert)}")
     sql_lines.append(f"port_berths updates: {len(gdf_berths_to_update)}")
     sql_lines.append(f"r_port_altnames inserts: {len(df_alt_names_to_insert)}")
@@ -799,7 +800,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
 # Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 # dbdev / dbprim03
-instance = 'dbprim03'
+instance = 'dbdev'
 # Establish connection and get next ids
 next_ids = {}
 if instance == 'dbdev':
@@ -824,7 +825,7 @@ print(next_ids)
 
 not_existing = []
 
-existing = [243, 13667, 89, 118, 1138, 13399, 13173, 156, 1324, 2403, 1372, 13741, 320, 120, 13717, 12426, 2634, 1325, 12478, 13823, 16876, 16839, 195681, 17131, 17643, 17135, 17168, 17081, 17365, 17270, 17143, 17883, 195321, 16763, 17084, 17021 ,1420, 12425, 16930, 202907, 202805]
+existing = [69,17085]
 
 
 port_zone_id_list = not_existing + existing
@@ -891,6 +892,8 @@ print(len(gdf_berths_to_delete), 'berths')
 
 df_terminals_basic_to_delete
 
+gdf_berths_to_delete
+
 # +
 # check anch relations differences
 df1 = gdf_MT_ports[['port_id', 'port_name', 'port_type', 'related_anch_id', 'related_port_id']].rename(columns={'related_anch_id':'MT_rel_anch'})
@@ -922,12 +925,13 @@ port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_in
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
 terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS', identity_insert=True)
 terminal_updates = generate_update_sql(df_terminals_basic_to_update, 'terminal_id', 'dbo.PORT_TERMINALS')
+terminal_deletes = generate_delete_sql(df_terminals_basic_to_delete, 'dbo.PORT_TERMINALS', where_cols=['terminal_id'])
 berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS', identity_insert=True)
 berth_updates = generate_update_sql(gdf_berths_to_update, 'berth_id', 'dbo.PORT_BERTHS')
 r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES', identity_insert=False) 
 r_altnames_deletes =  generate_delete_sql(df_alt_names_to_delete, 'dbo.R_PORT_ALTNAMES') 
 # Pending deletions ((or enable=False?) of ports, terminal, berths. Mark to merge events before deletion?
-final_sql = combine_sql_blocks(description, port_inserts, port_updates, terminal_inserts, terminal_updates, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
+final_sql = combine_sql_blocks(description, port_inserts, port_updates, terminal_inserts, terminal_updates, terminal_deletes, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
 #write to file
 with open('sql_output.sql', 'w') as f:
     f.write(final_sql)
@@ -935,3 +939,8 @@ print('Output characters:', len(final_sql))
 
 # +
 #pg_engine.dispose()
+# -
+
+df_terminals_basic_to_delete
+
+
