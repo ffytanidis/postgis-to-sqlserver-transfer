@@ -1,5 +1,6 @@
 from sqlalchemy import create_engine
 import pyodbc, os
+import zipfile
 from shapely.geometry.base import BaseGeometry
 from shapely import wkt
 from urllib.parse import quote_plus
@@ -37,6 +38,11 @@ dbprim03_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "DATABASE=ais;"
     f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}"
                     )
+dbprim_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
+    "SERVER=vpn-mt-prim-db.ad.shared.galil.io,1433;"
+    "DATABASE=ais;"
+    f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}"
+                 )
 # --- Create PostgreSQL engine ---
 pg_url = (
     f"postgresql://{pg_config['username']}:{pg_config['password']}@"
@@ -129,6 +135,64 @@ def fix_altnames_relations(gdf):
         # map port_id of terminals
         gdf['port_id'] = gdf['port_zone_id'].map(zone_port_map)
         return gdf
+
+def check_sandbox_mt_same(): #bookmark
+    # sandbox mt ports
+    q = f"""
+    select pb."PORT_ID" as port_id, pb.geometry 
+    from sandbox."MT_Ports" pb 
+    where pb."MOVING_SHIP_ID" is null
+    """
+    gdf_sandbox_p = gpd.read_postgis(
+        sql=q,
+        con=pg_engine,
+        geom_col='geometry'
+    )
+    gdf_sandbox_p['port_id'] = gdf_sandbox_p['port_id'].astype('int64')
+    gdf_sandbox_p = gdf_sandbox_p.reset_index(drop=True)
+    #sandbox mt berths
+    q = f"""
+    select mb."BERTH_ID" as berth_id, mb.geometry 
+    from sandbox."MT_Berths" mb 
+    """
+    gdf_sandbox_b = gpd.read_postgis(
+        sql=q,
+        con=pg_engine,
+        geom_col='geometry'
+    )
+    gdf_sandbox_b['berth_id'] = gdf_sandbox_b['berth_id'].astype('int64')
+    gdf_sandbox_b = gdf_sandbox_b.reset_index(drop=True)
+    #mt ports
+    query = f"""
+    select port_id, POLYGON.STAsText() as geometry
+    from ais.dbo.ports 
+    where confirmed=1
+    and MOVING_SHIP_ID is null
+    """
+    gdf_mt_p = pd.read_sql_query(query, sql_conn)
+    gdf_mt_p["geometry"] = gdf_mt_p["geometry"].apply(lambda s: wkt.loads(s) if pd.notna(s) else None)
+    gdf_mt_p = gpd.GeoDataFrame(gdf_mt_p, geometry="geometry", crs="EPSG:4326")
+    gdf_mt_p['port_id'] = gdf_mt_p['port_id'].astype('Int64')
+    gdf_mt_p = gdf_mt_p.reset_index(drop=True)
+    #mt berths
+    query = f"""
+    select berth_id, POLYGON.STAsText() as geometry
+    from ais.dbo.port_berths
+    """
+    gdf_mt_b = pd.read_sql_query(query, sql_conn)
+    gdf_mt_b["geometry"] = gdf_mt_b["geometry"].apply(lambda s: wkt.loads(s) if pd.notna(s) else None)
+    gdf_mt_b = gpd.GeoDataFrame(gdf_mt_b, geometry="geometry", crs="EPSG:4326")
+    gdf_mt_b['berth_id'] = gdf_mt_b['berth_id'].astype('Int64')
+    gdf_mt_b = gdf_mt_b.reset_index(drop=True)
+    #df_of_differences
+    gdf_p_merged = gdf_sandbox_p.merge(gdf_mt_p, on='port_id', how='outer')
+    gdf_p_diff = gdf_p_merged[gdf_p_merged['geometry_x']!=gdf_p_merged['geometry_y']]
+    gdf_b_merged = gdf_sandbox_b.merge(gdf_mt_b, on='berth_id', how='outer')
+    gdf_b_diff = gdf_b_merged[gdf_b_merged['geometry_x']!=gdf_b_merged['geometry_y']]
+    #ids
+    diff_ids = {'port_id_diff':list(gdf_p_diff['port_id']), 'berth_id_diff':list(gdf_b_diff['berth_id'])}
+    return diff_ids
+
 
 # PG reads
 # PG ports
@@ -864,16 +928,18 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     return df_log_combined
 
 
-# Inputs
+# Starting point: Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
-# dbdev / dbprim03
-instance = 'dbdev'
+# dbdev / dbprim03 / dbprim
+instance = 'dbprim'
 # Establish connection and get next ids
 next_ids = {}
 if instance == 'dbdev':
     selected_conn = dbdev_conn_str
 elif instance == 'dbprim03':
     selected_conn = dbprim03_conn_str
+elif instance == 'dbprim':
+    selected_conn = dbprim_conn_str
 else:
     raise ValueError('Input instance not valid')
 sql_conn = pyodbc.connect(selected_conn) 
@@ -885,6 +951,34 @@ next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
 #next_ids = {'dbo.ports':26513, 'dbo.port_terminals':4994, 'dbo.port_berths':33427}
 print(instance)
 print(next_ids)
+
+
+
+
+
+
+
+
+
+
+
+
+# Check if sandbox mt tables and mt target instance tables have differences on ids and geoms
+diff_ids = check_sandbox_mt_same()
+print(diff_ids)
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 # +
@@ -1022,8 +1116,6 @@ print('Output characters:', len(final_sql))
 
 #Export
 save_sql(final_sql, instance, lines_per_part=1000)
-
-import zipfile
 
 # +
 #pg_engine.dispose()
