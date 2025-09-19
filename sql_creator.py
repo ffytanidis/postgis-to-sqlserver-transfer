@@ -309,8 +309,6 @@ def read_PG_altnames(port_list = None):
         sql_where = f'zone_id in ({id_str})'
     else:
         sql_where = '1=1'
-    #sql query to get Berths
-    #sql query to get Ports
     pg_Port_alias_query = f"""
     select 
         zone_id as port_zone_id,
@@ -328,6 +326,24 @@ def read_PG_altnames(port_list = None):
     df['port_id'] = df['port_id'].astype('int64')
     print(len(df), "PG alt-names read")
     return df.reset_index(drop=True)
+# PG quality errors
+def read_errors():
+    all_zone_ids = list(gdf_PG_ports['zone_id']) + list(df_PG_terminals['zone_id']) + list(gdf_PG_berths['zone_id'])
+    if isinstance(all_zone_ids, list):
+        id_str = ', '.join(str(i) for i in all_zone_ids)
+    else:
+        raise ValueError(f"No zone_id list")
+    pg_quality_errors = f"""
+    select *
+    from sandbox.mview_geoquality_checks
+    where zone_id in ({id_str})
+    or zone_id_b in ({id_str})
+    """        
+    df = pd.read_sql(
+        sql = pg_quality_errors,
+        con = pg_engine)
+    print(len(df), "PG quality errors read")
+    return df.reset_index(drop=True) 
 
 # MT reads
 # next id
@@ -729,6 +745,57 @@ def generate_description_sql():
 # combine multiple SQL parts with clear separation
 def combine_sql_blocks(*blocks):
     return '\n\n'.join(block.strip() for block in blocks if block.strip())
+# Save output
+def save_sql(final_sql: str, instance: str, lines_per_part: int = 0):
+    """
+    save sql into timestamped folder:
+    - if lines_per_part == 0 -> save full sql into single file
+    - if lines_per_part >= 30 -> split into parts of given size, save separately
+    - else -> raise error
+    """
+    # create base output folder
+    base_dir = "output"
+    os.makedirs(base_dir, exist_ok=True)
+    # create timestamped subfolder
+    folder_name = datetime.now().strftime("%Y%m%d_%H%M%S") + f"_{instance}_sql_output"
+    folder_path = os.path.join(base_dir, folder_name)
+    os.makedirs(folder_path, exist_ok=True)
+    # split sql into lines
+    lines = final_sql.strip().split("\n")
+    total_lines = len(lines)
+    if lines_per_part == 0:
+        # save full sql
+        file_name = f"{folder_name}_full.sql"
+        file_path = os.path.join(folder_path, file_name)
+        with open(file_path, "w") as f:
+            f.write(final_sql)
+        print(f"✅ saved full sql: {file_path} ({total_lines} lines)")
+        return
+    elif lines_per_part < 30:
+        raise ValueError("lines_per_part must be 0 or at least 30")
+    else:
+        # save in parts with padded numbering
+        file_paths = []
+        part_count = 0
+        for i in range(0, total_lines, lines_per_part):
+            part_count += 1
+            chunk = "\n".join(lines[i:i + lines_per_part])
+            part_num = str(part_count).zfill(2)  # keep alphabetical ordering
+            file_name = f"{folder_name}_part_{part_num}.sql"
+            file_path = os.path.join(folder_path, file_name)
+            with open(file_path, "w") as f:
+                f.write(chunk)
+            file_paths.append(file_path)
+            print(f"📄 part_{part_num}: {len(chunk.splitlines())} lines -> {file_name}")  # quick per-part stat
+        # zip all parts
+        zip_name = f"{folder_name}_parts.zip"
+        zip_path = os.path.join(folder_path, zip_name)
+        with zipfile.ZipFile(zip_path, mode="w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for fp in file_paths:
+                zf.write(fp, arcname=os.path.basename(fp))  # store only filenames inside zip
+        print(f"✅ saved {part_count} parts in {folder_path} (total {total_lines} lines)")
+        print(f"🗜️ zipped parts: {zip_path}")
+        return 
 
 
 # Create log table
@@ -821,14 +888,17 @@ print(next_ids)
 
 
 # +
-# target ports
+# target ports existing
 
-not_existing = []
+not_existing = [196716, 24418, 181144, 183562, 195591, 180621, 179122, 175288, 185931, 197028, 173315, 185728, 183334, 195687, 186467, 182394, 188059, 176882, 183465, 183534, 186487, 186649, 186519, 196099, 22607,186739,186693, 186798, 194881]
 
-existing = [69,17085]
+existing = [1, 84, 130, 111, 175, 12969, 13675, 758, 2405, 106, 4, 327, 16437, 165, 890, 439, 1468, 524, 1133, 13690, 350, 122, 353, 13756, 157,13821]
 
+warning1 = [16769, 16898, 17926, 17040, 17, 16912, 15260, 16929, 17063, 16556, 16949, 17206, 211125, 16960, 16971, 16975, 15442, 15447, 15448, 15450, 16993, 17377, 17645, 15471, 15476, 16639]
 
-port_zone_id_list = not_existing + existing
+warning2 = [2722]
+
+port_zone_id_list = not_existing + existing + warning1 + warning2
 
 print('Port list count:', len(port_zone_id_list))
 # -
@@ -842,9 +912,6 @@ gdf_MT_ports = read_mt_ports()
 df_PG_terminals = read_PG_terminals(port_list = port_zone_id_list)
 df_PG_terminals_basic = df_PG_terminals[['terminal_id', 'terminal_name', 'port_id']]
 df_MT_terminals_basic = read_mt_terminals()
-#Pending: SMDG
-#df_PG_terminals_smdg = df_PG_terminals[[.............]]
-#df_MT_smdg
 #Berths
 gdf_PG_berths = read_PG_berths(port_list = port_zone_id_list) 
 gdf_MT_berths = read_mt_berths() 
@@ -854,7 +921,15 @@ df_MT_alt_names = read_mt_r_port_altnames()
 # add port name to PG alt names
 df_alts_to_add = gdf_PG_ports[['zone_id', 'port_name', 'port_id']].rename(columns={'zone_id':'port_zone_id', 'port_name':'alias_name'})
 df_PG_alt_names = pd.concat([df_alts_to_add, df_PG_alt_names]).drop_duplicates().reset_index(drop=True)
+#Quality errors
+df_errors = read_errors()
 
+
+# Count Errors
+df_errors.groupby(['error_class', 'error']).count()[['zone_id']].reset_index()
+
+# show critical
+df_errors[df_errors['error_class']=='Critical'][['zone_id', 'zone_name', 'zone_type_name', 'error']]
 
 # Split/prepare dataframes per handling type
 #Ports
@@ -890,9 +965,12 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
-df_terminals_basic_to_delete
+# +
+# check berths to be deleted of related port of anch of port...
+df_temp = gdf_berths_to_delete[['berth_id', 'port_id']].merge(gdf_PG_ports[['zone_id', 'port_id', 'related_zone_anch_id', 'related_zone_port_id']], on='port_id').merge(gdf_PG_ports[['zone_id', 'related_zone_anch_id', 'related_zone_port_id']], on = 'related_zone_anch_id')
 
-gdf_berths_to_delete
+df_temp['zone_id_y'].value_counts()
+df_temp
 
 # +
 # check anch relations differences
@@ -921,6 +999,7 @@ df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 # sql parts and combine
 # Pending? check_next_id 
 description = generate_description_sql() 
+begin_statement = 'BEGIN TRANSACTION;'
 port_inserts = generate_insert_sql(gdf_ports_to_insert, 'dbo.PORTS', identity_insert=True)
 port_updates = generate_update_sql(gdf_ports_to_update, 'port_id', 'dbo.PORTS')
 terminal_inserts = generate_insert_sql(df_terminals_basic_to_insert, 'dbo.PORT_TERMINALS', identity_insert=True)
@@ -930,17 +1009,24 @@ berth_inserts = generate_insert_sql(gdf_berths_to_insert, 'dbo.PORT_BERTHS', ide
 berth_updates = generate_update_sql(gdf_berths_to_update, 'berth_id', 'dbo.PORT_BERTHS')
 r_altnames_inserts = generate_insert_sql(df_alt_names_to_insert, 'dbo.R_PORT_ALTNAMES', identity_insert=False) 
 r_altnames_deletes =  generate_delete_sql(df_alt_names_to_delete, 'dbo.R_PORT_ALTNAMES') 
+commit_statement = 'COMMIT;'
 # Pending deletions ((or enable=False?) of ports, terminal, berths. Mark to merge events before deletion?
-final_sql = combine_sql_blocks(description, port_inserts, port_updates, terminal_inserts, terminal_updates, terminal_deletes, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes)  
-#write to file
-with open('sql_output.sql', 'w') as f:
-    f.write(final_sql)
+final_sql = combine_sql_blocks(description, begin_statement, port_inserts, port_updates, terminal_inserts, terminal_updates, terminal_deletes, berth_inserts, berth_updates, r_altnames_inserts, r_altnames_deletes, commit_statement)  
+# size
+print('Output lines:', len(final_sql.strip().split("\n")))
 print('Output characters:', len(final_sql))
+
+# +
+#print(final_sql)
+# -
+
+#Export
+save_sql(final_sql, instance, lines_per_part=1000)
+
+import zipfile
 
 # +
 #pg_engine.dispose()
 # -
-
-df_terminals_basic_to_delete
 
 
