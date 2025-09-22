@@ -136,7 +136,7 @@ def fix_altnames_relations(gdf):
         gdf['port_id'] = gdf['port_zone_id'].map(zone_port_map)
         return gdf
 
-def check_sandbox_mt_same(): #bookmark
+def check_sandbox_mt_same():
     # sandbox mt ports
     q = f"""
     select pb."PORT_ID" as port_id, pb.geometry 
@@ -191,7 +191,9 @@ def check_sandbox_mt_same(): #bookmark
     gdf_b_diff = gdf_b_merged[gdf_b_merged['geometry_x']!=gdf_b_merged['geometry_y']]
     #ids
     diff_ids = {'port_id_diff':list(gdf_p_diff['port_id']), 'berth_id_diff':list(gdf_b_diff['berth_id'])}
-    return diff_ids
+    print(instance)
+    print('Port diffs', len(gdf_p_diff), 'Berth diffs', len(gdf_b_diff),)
+    return [gdf_p_diff, gdf_b_diff]
 
 
 # PG reads
@@ -206,29 +208,32 @@ def read_PG_ports(port_list = None):
     SELECT
         mp.zone_id,
         mt_id as port_id,
-        name as port_name,
+        mp.name as port_name,
+        mp.name as standard_name,
+        z.zone_name,
         (coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[1] as altname1,
       	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[2] as altname2,
       	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[3] as altname3,
       	(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}'))[4] as altname4,
-        zone_type,
-        unlocode,
-        country_code,
-        timezone_name as timezone,
-        dst_id as dst,
-        enable_calls,
-        confirmed,
-        round(("CENTERY" - greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))))::numeric, 5) as sw_y,
-        round(("CENTERX" - greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))))::numeric, 5) as sw_x,
-        round(("CENTERY" + greatest(abs("CENTERY" - st_ymin(polygon_geom)), abs("CENTERY" - st_ymax(polygon_geom))))::numeric, 5) as ne_y,
-        round(("CENTERX" + greatest(abs("CENTERX" - st_xmin(polygon_geom)), abs("CENTERX" - st_xmax(polygon_geom))))::numeric, 5) as ne_x,
-        alternative_names,
-        alternative_unlocodes,
+        mp.zone_type,
+        mp.unlocode,
+        mp.country_code,
+        mp.timezone_name as timezone,
+        mp.dst_id as dst,
+        mp.enable_calls,
+        mp.confirmed,
+        round(("CENTERY" - greatest(abs("CENTERY" - st_ymin(mp.polygon_geom)), abs("CENTERY" - st_ymax(mp.polygon_geom))))::numeric, 5) as sw_y,
+        round(("CENTERX" - greatest(abs("CENTERX" - st_xmin(mp.polygon_geom)), abs("CENTERX" - st_xmax(mp.polygon_geom))))::numeric, 5) as sw_x,
+        round(("CENTERY" + greatest(abs("CENTERY" - st_ymin(mp.polygon_geom)), abs("CENTERY" - st_ymax(mp.polygon_geom))))::numeric, 5) as ne_y,
+        round(("CENTERX" + greatest(abs("CENTERX" - st_xmin(mp.polygon_geom)), abs("CENTERX" - st_xmax(mp.polygon_geom))))::numeric, 5) as ne_x,
+        mp.alternative_names,
+        mp.alternative_unlocodes,
         ap.primary_related_zone_anch_id AS related_zone_anch_id,
         ap.primary_related_zone_port_id AS related_zone_port_id,
-        polygon_geom as polygon
+        mp.polygon_geom as polygon
     FROM sandbox.mview_master_ports mp
     left join sandbox.v_port_anchorage_primary ap on ap.zone_id = mp.zone_id
+    left join geospatial.zones z on z.zone_id = mp.zone_id
     where {sql_where}
     """
     gdf = gpd.read_postgis(
@@ -247,20 +252,6 @@ def read_PG_ports(port_list = None):
     gdf['sw_y'] = gdf['sw_y'].round(6)
     gdf['ne_x'] = gdf['ne_x'].round(6)
     gdf['ne_y'] = gdf['ne_y'].round(6)
-    # string lengths
-    def trim_name(name):
-        if not isinstance(name, str):
-            return name  # skip non-strings or NaNs
-        if len(name) > 20 and name.endswith(" PORT"):
-            name = name[:-5]  # remove ' PORT'
-        if len(name) > 20 and name.endswith(" ANCHORAGE"):
-            name = name[:-5]  # remove 'ORAGE'
-        return name[:20]  # trim to max 20 chars
-    gdf['port_name'] = gdf['port_name'].apply(trim_name)
-    gdf['altname1'] = gdf['altname1'].apply(trim_name)
-    gdf['altname2'] = gdf['altname2'].apply(trim_name)
-    gdf['altname3'] = gdf['altname3'].apply(trim_name)
-    gdf['altname4'] = gdf['altname4'].apply(trim_name)
     # dtypes
     gdf['port_id'] = gdf['port_id'].astype('int64')
     gdf['related_anch_id'] = gdf['related_anch_id'].astype('Int64')
@@ -276,6 +267,28 @@ def read_PG_ports(port_list = None):
     gdf['port_type'] = gdf['zone_type'].map(PORT_TYPE_MAPPING)
     if gdf['port_type'].isnull().any():
         raise ValueError("Port type has null")
+    # name handling
+    def fix_name(row):
+        name = row['port_name']
+        port_type = row['port_type']
+        if not isinstance(name, str) or name is None:  # skip non-strings/NaN/None
+            return name
+        # apply type-specific replacements
+        if port_type == 'P':
+            name = name.replace(" PORT", "")  # drop ' PORT'
+        elif port_type == 'A':
+            name = name.replace("ANCHORAGE", "ANCH")  # shorten anchorage
+        elif port_type == 'T':
+            name = name.replace(" OT", "")  # drop ' OT'
+        return name        
+    for col in ['port_name', 'altname1', 'altname2', 'altname3', 'altname4']:
+        gdf[col] = gdf.apply(lambda row: fix_name({'port_name': row[col], 'port_type': row['port_type']}), axis=1)
+    gdf['name_trimmed'] = gdf['port_name'].apply(len)>20
+    gdf['port_name'] = gdf['port_name'].str[:20]
+    gdf['altname1'] = gdf['altname1'].str[:20]
+    gdf['altname2'] = gdf['altname2'].str[:20]
+    gdf['altname3'] = gdf['altname3'].str[:20]
+    gdf['altname4'] = gdf['altname4'].str[:20]
     print(len(gdf), "PG ports read")
     return gdf.reset_index(drop=True)
 # PG terminals
@@ -287,10 +300,12 @@ def read_PG_terminals(port_list = None):
         sql_where = '1=1'
     q = f"""
     SELECT 
-        zone_id,
+        mtt.zone_id,
         port_id as port_zone_id,
         terminal_id,
         name as terminal_name,
+        name as standard_name,
+        z.zone_name,
         unlocode,
         terminal_code,
         terminal_facility_name,
@@ -304,7 +319,9 @@ def read_PG_terminals(port_list = None):
         terminal_address,
         remarks,
         zone_type
-    FROM sandbox.mview_master_terminals_mt where {sql_where}
+    FROM sandbox.mview_master_terminals_mt mtt
+    left join geospatial.zones z on z.zone_id = mtt.zone_id
+    where {sql_where}
     """
     df = pd.read_sql(
         sql = q,
@@ -315,6 +332,7 @@ def read_PG_terminals(port_list = None):
     df = df.sort_values('port_id')
     df = fill_column_with_increment(df, 'terminal_id', next_ids['dbo.port_terminals'])
     # fix string lengths
+    df['name_trimmed'] = df['terminal_name'].apply(len)>50
     df['terminal_name'] = df['terminal_name'].str[:50]
     # dtypes
     df['terminal_id'] = df['terminal_id'].astype('int64')
@@ -330,11 +348,13 @@ def read_PG_berths(port_list = None):
         sql_where = '1=1'
     q = f"""
     SELECT 
-        zone_id,
+        mb.zone_id,
         mt_id as berth_id,
         terminal_id as terminal_zone_id,
         port_id as port_zone_id,
         name as berth_name,
+        name as standard_name,
+        z.zone_name,
         zone_type,
         "MAX_LENGTH" as max_length,
         "MAX_DRAUGHT" as max_draught,
@@ -343,8 +363,10 @@ def read_PG_berths(port_list = None):
         "BULK_CAPACITY" as bulk_capacity,
         "DESCRIPTION" as description,
         "MAX_TIDAL_DRAUGHT" as max_tidal_draught,
-        polygon_geom as polygon
-    FROM sandbox.mview_master_berths where {sql_where}
+         mb.polygon_geom as polygon
+    FROM sandbox.mview_master_berths mb
+    left join geospatial.zones z on z.zone_id = mb.zone_id    
+    where {sql_where}
     """
     gdf = gpd.read_postgis(
         sql=q,
@@ -359,6 +381,7 @@ def read_PG_berths(port_list = None):
     gdf = gdf.sort_values(['port_id', 'terminal_id'])
     gdf = fill_column_with_increment(gdf, 'berth_id', next_ids['dbo.port_berths'])
     # string lengths
+    gdf['name_trimmed'] = gdf['berth_name'].apply(len)>30
     gdf['berth_name'] = gdf['berth_name'].str[:30]
     # dtypes
     gdf['berth_id'] = gdf['berth_id'].astype('Int64')
@@ -407,7 +430,17 @@ def read_errors():
         sql = pg_quality_errors,
         con = pg_engine)
     print(len(df), "PG quality errors read")
-    return df.reset_index(drop=True) 
+    return df.reset_index(drop=True)
+# Name check
+def name_check():
+    dfp = gdf_PG_ports[['zone_id', 'zone_name', 'zone_type', 'standard_name', 'port_type', 'port_name', 'name_trimmed']].rename(columns={'port_type':'mt_type', 'port_name':'name'})
+    dft = df_PG_terminals[['zone_id', 'zone_name','zone_type', 'standard_name', 'terminal_name', 'name_trimmed']].rename(columns={'terminal_name':'name'})
+    dft['mt_type'] = 'terminal'
+    dfb = gdf_PG_berths[['zone_id', 'zone_name', 'zone_type', 'standard_name', 'berth_name', 'name_trimmed']].rename(columns={'berth_name':'name'})
+    dfb['mt_type'] = 'berth'
+    df_name_check = pd.concat([dfp, dft, dfb])
+    print(sum(df_name_check['name_trimmed']), 'names trimmed')
+    return df_name_check.reset_index(drop=True)
 
 # MT reads
 # next id
@@ -498,7 +531,6 @@ def read_mt_terminals():
     df['port_id'] = df['port_id'].astype('Int64')
     print(len(df), "MT terminals read")
     return df
-#Pending: read MT smdg
 #MT berths
 def read_mt_berths():
     # comma seperated port_ids 
@@ -662,7 +694,6 @@ def create_df_to_delete(df_new, df_existing, index_col=None):
     if missing_in_new:
         raise ValueError(f"df_new lacks required columns: {missing_in_new}")
     df_new = df_new[out_cols]
-
     # decide key columns
     if index_col is None:
         keys = out_cols
@@ -670,18 +701,15 @@ def create_df_to_delete(df_new, df_existing, index_col=None):
         keys = [index_col]
     else:
         keys = list(index_col)
-
     # sanity: keys must exist on both sides
     for k in keys:
         if k not in out_cols:
             raise ValueError(f"key '{k}' not found in df_existing columns")
         if k not in df_new.columns:
             raise ValueError(f"key '{k}' not found in df_new columns")
-
     # compare on clean range indexes
     idx_existing = df_existing.reset_index(drop=True).set_index(keys).index
     idx_new = df_new.reset_index(drop=True).set_index(keys).index
-
     # keep rows that are in existing but not in new
     mask = ~idx_existing.isin(idx_new)
     return df_existing.loc[mask, out_cols].reset_index(drop=True)
@@ -875,10 +903,11 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     df_log_ports['mt_table'] = 'ports'
     if comments:
         df_log_ports['comments'] = comments
-    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_insert['port_id']), 'statement'] = 'insert'
-    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_update['port_id']), 'statement'] = 'update'
-    df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_delete['port_id']), 'statement'] = 'delete'
-    df_log_ports['statement'] = df_log_ports['statement'].fillna('no diff')
+    df_log_ports['statement'] = 'no diff'
+    if len(df_log_ports)>0:
+        df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_insert['port_id']), 'statement'] = 'insert'
+        df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_update['port_id']), 'statement'] = 'update'
+        df_log_ports.loc[df_log_ports['mt_id'].isin(gdf_ports_to_delete['port_id']), 'statement'] = 'delete'
     # TERMINALS
     #insert and update from PG + delete from 
     df_log_terminals = pd.concat([df_PG_terminals[['terminal_id', 'terminal_name', 'zone_id', 'zone_type']],
@@ -891,10 +920,11 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     df_log_terminals['mt_type'] = 'terminal'
     if comments:
         df_log_terminals['comments'] = comments
-    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_insert['terminal_id']), 'statement'] = 'insert'
-    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_update['terminal_id']), 'statement'] = 'update'
-    df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_delete['terminal_id']), 'statement'] = 'delete'
-    df_log_terminals['statement'] = df_log_terminals['statement'].fillna('no diff')
+    df_log_terminals['statement'] = 'no diff'
+    if len(df_log_terminals)>0:
+        df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_insert['terminal_id']), 'statement'] = 'insert'
+        df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_update['terminal_id']), 'statement'] = 'update'
+        df_log_terminals.loc[df_log_terminals['mt_id'].isin(df_terminals_basic_to_delete['terminal_id']), 'statement'] = 'delete'
     # BERTHS
     #insert and update from PG + delete from 
     df_log_berths = pd.concat([gdf_PG_berths[['berth_id','berth_name', 'zone_id', 'zone_type']],
@@ -907,10 +937,11 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     df_log_berths['mt_type'] = 'berth'
     if comments:
         df_log_berths['comments'] = comments
-    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_insert['berth_id']), 'statement'] = 'insert'
-    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_update['berth_id']), 'statement'] = 'update'
-    df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_delete['berth_id']), 'statement'] = 'delete'
-    df_log_berths['statement'] = df_log_berths['statement'].fillna('no diff')
+    df_log_berths['statement'] = 'no diff'
+    if len(df_log_berths)>0:
+        df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_insert['berth_id']), 'statement'] = 'insert'
+        df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_update['berth_id']), 'statement'] = 'update'
+        df_log_berths.loc[df_log_berths['mt_id'].isin(gdf_berths_to_delete['berth_id']), 'statement'] = 'delete'
     # COMBINE
     df_log_combined = pd.concat([df_log_ports, df_log_terminals, df_log_berths])
     df_log_combined['zone_id'] = df_log_combined['zone_id'].astype('Int64')
@@ -953,45 +984,29 @@ print(instance)
 print(next_ids)
 
 
-
-
-
-
-
-
-
-
-
-
+# +
 # Check if sandbox mt tables and mt target instance tables have differences on ids and geoms
-diff_ids = check_sandbox_mt_same()
-print(diff_ids)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+# print('')
+# instance = 'dbdev'
+# sql_conn = pyodbc.connect(dbdev_conn_str) 
+# diff_ids = check_sandbox_mt_same()
+# print('')
+# instance = 'dbprim03'
+# sql_conn = pyodbc.connect(dbprim03_conn_str) 
+# diff_ids = check_sandbox_mt_same()
+# print('')
+# instance = 'dbprim'
+# sql_conn = pyodbc.connect(dbprim_conn_str) 
+# diff_ids = check_sandbox_mt_same()
 
 # +
 # target ports existing
+# bookmark
+not_existing = []
 
-not_existing = [196716, 24418, 181144, 183562, 195591, 180621, 179122, 175288, 185931, 197028, 173315, 185728, 183334, 195687, 186467, 182394, 188059, 176882, 183465, 183534, 186487, 186649, 186519, 196099, 22607,186739,186693, 186798, 194881]
-
-existing = [1, 84, 130, 111, 175, 12969, 13675, 758, 2405, 106, 4, 327, 16437, 165, 890, 439, 1468, 524, 1133, 13690, 350, 122, 353, 13756, 157,13821]
-
-warning1 = [16769, 16898, 17926, 17040, 17, 16912, 15260, 16929, 17063, 16556, 16949, 17206, 211125, 16960, 16971, 16975, 15442, 15447, 15448, 15450, 16993, 17377, 17645, 15471, 15476, 16639]
-
-warning2 = [2722]
-
+existing = [194883]
+warning1 = []
+warning2 = []
 port_zone_id_list = not_existing + existing + warning1 + warning2
 
 print('Port list count:', len(port_zone_id_list))
@@ -1015,9 +1030,17 @@ df_MT_alt_names = read_mt_r_port_altnames()
 # add port name to PG alt names
 df_alts_to_add = gdf_PG_ports[['zone_id', 'port_name', 'port_id']].rename(columns={'zone_id':'port_zone_id', 'port_name':'alias_name'})
 df_PG_alt_names = pd.concat([df_alts_to_add, df_PG_alt_names]).drop_duplicates().reset_index(drop=True)
+print('')
 #Quality errors
 df_errors = read_errors()
+#Name check
+df_name_check = name_check()
 
+
+# Names trimmed
+df_name_check[df_name_check['name_trimmed']]
+# Optional: export names for eye passthrough
+#df_name_check.to_excel("name_check.xlsx", index=False)
 
 # Count Errors
 df_errors.groupby(['error_class', 'error']).count()[['zone_id']].reset_index()
@@ -1059,6 +1082,8 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
+df_terminals_basic_to_update
+
 # +
 # check berths to be deleted of related port of anch of port...
 df_temp = gdf_berths_to_delete[['berth_id', 'port_id']].merge(gdf_PG_ports[['zone_id', 'port_id', 'related_zone_anch_id', 'related_zone_port_id']], on='port_id').merge(gdf_PG_ports[['zone_id', 'related_zone_anch_id', 'related_zone_port_id']], on = 'related_zone_anch_id')
@@ -1086,7 +1111,7 @@ df_merged = df_merged.fillna(-1)
 df_merged[df_merged['timezone_x']!=df_merged['timezone_y']][['port_id', 'port_name_x', 'timezone_x', 'timezone_y']]
 # -
 
-# handle log
+# handle log #bookmark
 df_log = log_dataset(write=False, write_no_diff=True, comments='pending execution')
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 
