@@ -220,7 +220,14 @@ def read_PG_ports(port_list = None):
         mp.country_code,
         mp.timezone_name as timezone,
         mp.dst_id as dst,
-        mp.enable_calls,
+        CASE 
+            WHEN mp.zone_id IN (
+                SELECT zone_id 
+                FROM geospatial.zones 
+                WHERE parent_zone_id IS NULL
+            ) THEN 1
+            ELSE 0
+        END AS enable_calls,
         mp.confirmed,
         round(("CENTERY" - greatest(abs("CENTERY" - st_ymin(mp.polygon_geom)), abs("CENTERY" - st_ymax(mp.polygon_geom))))::numeric, 5) as sw_y,
         round(("CENTERX" - greatest(abs("CENTERX" - st_xmin(mp.polygon_geom)), abs("CENTERX" - st_xmax(mp.polygon_geom))))::numeric, 5) as sw_x,
@@ -984,7 +991,6 @@ print(instance)
 print(next_ids)
 
 
-# +
 # Check if sandbox mt tables and mt target instance tables have differences on ids and geoms
 # print('')
 # instance = 'dbdev'
@@ -995,17 +1001,19 @@ print(next_ids)
 # sql_conn = pyodbc.connect(dbprim03_conn_str) 
 # diff_ids = check_sandbox_mt_same()
 # print('')
-# instance = 'dbprim'
-# sql_conn = pyodbc.connect(dbprim_conn_str) 
-# diff_ids = check_sandbox_mt_same()
+instance = 'dbprim'
+sql_conn = pyodbc.connect(dbprim_conn_str) 
+diff_ids = check_sandbox_mt_same()
+
+diff_ids[0]
 
 # +
 # target ports existing
 # bookmark
 not_existing = []
 
-existing = [194883]
-warning1 = []
+existing = [166252, 178573, 181811, 195372, 175339, 180770, 181285, 195439, 196689, 200443]
+warning1 = [196690]
 warning2 = []
 port_zone_id_list = not_existing + existing + warning1 + warning2
 
@@ -1045,8 +1053,8 @@ df_name_check[df_name_check['name_trimmed']]
 # Count Errors
 df_errors.groupby(['error_class', 'error']).count()[['zone_id']].reset_index()
 
-# show critical
-df_errors[df_errors['error_class']=='Critical'][['zone_id', 'zone_name', 'zone_type_name', 'error']]
+# show errors
+df_errors[df_errors['error_class']=='Improvement'][['zone_id', 'zone_name', 'zone_type_name', 'error']]
 
 # Split/prepare dataframes per handling type
 #Ports
@@ -1082,8 +1090,6 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
-df_terminals_basic_to_update
-
 # +
 # check berths to be deleted of related port of anch of port...
 df_temp = gdf_berths_to_delete[['berth_id', 'port_id']].merge(gdf_PG_ports[['zone_id', 'port_id', 'related_zone_anch_id', 'related_zone_port_id']], on='port_id').merge(gdf_PG_ports[['zone_id', 'related_zone_anch_id', 'related_zone_port_id']], on = 'related_zone_anch_id')
@@ -1111,7 +1117,7 @@ df_merged = df_merged.fillna(-1)
 df_merged[df_merged['timezone_x']!=df_merged['timezone_y']][['port_id', 'port_name_x', 'timezone_x', 'timezone_y']]
 # -
 
-# handle log #bookmark
+# handle log
 df_log = log_dataset(write=False, write_no_diff=True, comments='pending execution')
 df_log.groupby(['mt_table', 'statement']).count()['mt_id'].reset_index()
 
