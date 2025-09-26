@@ -1005,7 +1005,7 @@ instance = 'dbprim'
 sql_conn = pyodbc.connect(dbprim_conn_str) 
 diff_ids = check_sandbox_mt_same()
 
-diff_ids[0]
+diff_ids[1]
 
 # +
 # target ports existing
@@ -1016,6 +1016,7 @@ existing = [166252, 178573, 181811, 195372, 175339, 180770, 181285, 195439, 1966
 warning1 = [196690]
 warning2 = []
 port_zone_id_list = not_existing + existing + warning1 + warning2
+
 
 print('Port list count:', len(port_zone_id_list))
 # -
