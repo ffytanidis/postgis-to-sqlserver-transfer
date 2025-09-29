@@ -20,7 +20,7 @@ warnings.filterwarnings('ignore')
 load_dotenv()
 
 # Connections
-# --- Config ---
+# --- MT
 pg_config = {
     'username': 'analyst_ddl',
     'password': quote_plus(os.getenv('PG_PASSWORD')),
@@ -43,12 +43,11 @@ dbprim_conn_str = ("DRIVER={ODBC Driver 17 for SQL Server};"
     "DATABASE=ais;"
     f"UID=kp_daan;PWD={os.getenv('SQL_SERVER_PASSWORD')}"
                  )
-# --- Create PostgreSQL engine ---
+# --- PG
 pg_url = (
     f"postgresql://{pg_config['username']}:{pg_config['password']}@"
     f"{pg_config['host']}:{pg_config['port']}/{pg_config['database']}"
 )
-pg_engine = create_engine(pg_url)
 
 # Create functions
 # Fix functions
@@ -138,6 +137,8 @@ def fix_altnames_relations(gdf):
 
 def check_sandbox_mt_same():
     # sandbox mt ports
+    pg_engine = create_engine(pg_url)
+    sql_conn = pyodbc.connect(selected_conn)
     q = f"""
     select pb."PORT_ID" as port_id, pb.geometry 
     from sandbox."MT_Ports" pb 
@@ -193,6 +194,8 @@ def check_sandbox_mt_same():
     diff_ids = {'port_id_diff':list(gdf_p_diff['port_id']), 'berth_id_diff':list(gdf_b_diff['berth_id'])}
     print(instance)
     print('Port diffs', len(gdf_p_diff), 'Berth diffs', len(gdf_b_diff),)
+    pg_engine.dispose()
+    sql_conn.close()
     return [gdf_p_diff, gdf_b_diff]
 
 
@@ -243,11 +246,13 @@ def read_PG_ports(port_list = None):
     left join geospatial.zones z on z.zone_id = mp.zone_id
     where {sql_where}
     """
+    pg_engine = create_engine(pg_url)
     gdf = gpd.read_postgis(
         sql=q,
         con=pg_engine,
         geom_col='polygon'
     )
+    pg_engine.dispose()
     # geometry orientation
     gdf['polygon'] = gdf['polygon'].apply(lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
     # new mt port_ids
@@ -330,9 +335,11 @@ def read_PG_terminals(port_list = None):
     left join geospatial.zones z on z.zone_id = mtt.zone_id
     where {sql_where}
     """
+    pg_engine = create_engine(pg_url)
     df = pd.read_sql(
         sql = q,
         con = pg_engine)
+    pg_engine.dispose()
     # fix relations
     df = fix_terminal_relations(df)
     # fill new mt terminal_ids
@@ -375,11 +382,13 @@ def read_PG_berths(port_list = None):
     left join geospatial.zones z on z.zone_id = mb.zone_id    
     where {sql_where}
     """
+    pg_engine = create_engine(pg_url)
     gdf = gpd.read_postgis(
         sql=q,
         con=pg_engine,
         geom_col='polygon'
     )
+    pg_engine.dispose()
     # Check for ring orientation issues SQL server requires : outer ring - anti clockwise & inner ring-clockwise
     gdf['polygon'] = gdf['polygon'].apply(lambda geom: correct_orientation(geom) if geom and geom.is_valid else geom)
     # relations
@@ -408,10 +417,12 @@ def read_PG_altnames(port_list = None):
         zone_id as port_zone_id,
         unnest(coalesce(alternative_names, '{{}}') || coalesce(alternative_unlocodes, '{{}}')) as alias_name
     from sandbox.mview_master_ports where {sql_where}
-    """        
+    """
+    pg_engine = create_engine(pg_url)
     df = pd.read_sql(
         sql = pg_Port_alias_query,
         con = pg_engine)
+    pg_engine.dispose()
     # fix relations
     df = fix_altnames_relations(df)
     # fix string lengths
@@ -432,10 +443,12 @@ def read_errors():
     from sandbox.mview_geoquality_checks
     where zone_id in ({id_str})
     or zone_id_b in ({id_str})
-    """        
+    """
+    pg_engine = create_engine(pg_url)
     df = pd.read_sql(
         sql = pg_quality_errors,
         con = pg_engine)
+    pg_engine.dispose()
     print(len(df), "PG quality errors read")
     return df.reset_index(drop=True)
 # Name check
@@ -451,14 +464,22 @@ def name_check():
 
 # MT reads
 # next id
-def get_next_identity(conn, table_name):
-    query = f"""
-    SELECT IDENT_CURRENT('{table_name}') + IDENT_INCR('{table_name}') AS next_identity;
-    """
-    cursor = conn.cursor()
+def get_next_identity():
+    sql_conn = pyodbc.connect(selected_conn)
+    cursor = sql_conn.cursor()
+    next_ids = {}
+    query = "SELECT IDENT_CURRENT('dbo.ports') + IDENT_INCR('dbo.ports') AS next_identity;"
     cursor.execute(query)
-    row = cursor.fetchone()
-    return int(row[0]) if row and row[0] is not None else 1
+    next_ids['dbo.ports'] = int(cursor.fetchone()[0])
+    query = "SELECT IDENT_CURRENT('dbo.port_terminals') + IDENT_INCR('dbo.port_terminals') AS next_identity;"
+    cursor.execute(query)
+    next_ids['dbo.port_terminals'] = int(cursor.fetchone()[0])
+    query = "SELECT IDENT_CURRENT('dbo.port_berths') + IDENT_INCR('dbo.port_berths') AS next_identity;"
+    cursor.execute(query)
+    next_ids['dbo.port_berths'] = int(cursor.fetchone()[0])
+    cursor.close()
+    sql_conn.close()
+    return next_ids
 # MT ports
 def read_mt_ports():
     mt_port_ids = list(gdf_PG_ports[['port_id']].dropna()['port_id'].astype('Int64'))
@@ -485,7 +506,9 @@ def read_mt_ports():
     from dbo.ports p
     where port_id in ({id_str})
     """
+    sql_conn = pyodbc.connect(selected_conn)
     df = pd.read_sql_query(query, sql_conn)
+    sql_conn.close()
     # proper geometry type
     df["polygon"] = df["polygon"].apply(lambda s: wkt.loads(s) if pd.notna(s) else None)
     gdf = gpd.GeoDataFrame(df, geometry="polygon", crs="EPSG:4326")
@@ -506,7 +529,9 @@ def read_mt_r_port_altnames():
     join ais.dbo.PORTS p on p.port_id = am.port_id
     where am.port_id in ({id_str})
     """
+    sql_conn = pyodbc.connect(selected_conn)
     df = pd.read_sql_query(query, sql_conn)
+    sql_conn.close()
     print(len(df), "MT r_altnames read")
     return df
 #MT terminals
@@ -534,7 +559,9 @@ def read_mt_terminals():
     or terminal_id in (select terminal_id from dbo.port_berths where port_id in ({port_id_str}))
     or terminal_id in ({terminal_id_str})
     """
+    sql_conn = pyodbc.connect(selected_conn)
     df = pd.read_sql_query(query, sql_conn)
+    sql_conn.close()
     df['port_id'] = df['port_id'].astype('Int64')
     print(len(df), "MT terminals read")
     return df
@@ -570,7 +597,9 @@ def read_mt_berths():
     where port_id in ({port_id_str})
         or berth_id in ({berth_id_str})
     """
+    sql_conn = pyodbc.connect(selected_conn)
     df = pd.read_sql_query(query, sql_conn)
+    sql_conn.close()
     df["polygon"] = df["polygon"].apply(lambda s: wkt.loads(s) if pd.notna(s) else None)
     gdf = gpd.GeoDataFrame(df, geometry="polygon", crs="EPSG:4326")
     gdf['port_id'] = gdf['port_id'].astype('Int64')
@@ -966,6 +995,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
     return df_log_combined
 
 
+# +
 # Starting point: Inputs
 # 1. Decide starting point of next id fills. Can be read from specified MT instance, or specified for any testing/purpose
 # dbdev / dbprim03 / dbprim
@@ -980,42 +1010,45 @@ elif instance == 'dbprim':
     selected_conn = dbprim_conn_str
 else:
     raise ValueError('Input instance not valid')
-sql_conn = pyodbc.connect(selected_conn) 
-sql_cur = sql_conn.cursor()
-next_ids['dbo.ports'] = get_next_identity(sql_conn, 'dbo.ports')
-next_ids['dbo.port_terminals'] = get_next_identity(sql_conn, 'dbo.port_terminals')
-next_ids['dbo.port_berths'] = get_next_identity(sql_conn, 'dbo.port_berths')
+
+next_ids = get_next_identity()
 # Optional: overwrite with manual input
 #next_ids = {'dbo.ports':26513, 'dbo.port_terminals':4994, 'dbo.port_berths':33427}
 print(instance)
 print(next_ids)
+# -
 
 
 # Check if sandbox mt tables and mt target instance tables have differences on ids and geoms
-# print('')
-# instance = 'dbdev'
-# sql_conn = pyodbc.connect(dbdev_conn_str) 
-# diff_ids = check_sandbox_mt_same()
-# print('')
-# instance = 'dbprim03'
-# sql_conn = pyodbc.connect(dbprim03_conn_str) 
-# diff_ids = check_sandbox_mt_same()
-# print('')
-instance = 'dbprim'
-sql_conn = pyodbc.connect(dbprim_conn_str) 
-diff_ids = check_sandbox_mt_same()
+diff_ids = check_sandbox_mt_same() #bookmark
 
 diff_ids[1]
 
+# one-liner save
+pd.Series(port_zone_id_list).to_csv("temp.csv", index=False)
+
+# one-liner load
+port_zone_id_list = list(pd.read_csv("all_only_inserts.csv")['0'])
+len(port_zone_id_list)
+
+print(port_zone_id_list)
+
 # +
 # target ports existing
-# bookmark
 not_existing = []
-
-existing = [166252, 178573, 181811, 195372, 175339, 180770, 181285, 195439, 196689, 200443]
-warning1 = [196690]
+existing = []
+warning1 = []
 warning2 = []
-port_zone_id_list = not_existing + existing + warning1 + warning2
+minus1 = []
+minus2 = []
+minus3 = []
+
+# combine everything into one big list
+combined = not_existing + existing + warning1 + warning2
+
+# remove unwanted items
+to_remove = minus1 + minus2 +minus3
+port_zone_id_list = [x for x in combined if x not in to_remove]
 
 
 print('Port list count:', len(port_zone_id_list))
@@ -1091,12 +1124,18 @@ print(len(df_alt_names_to_delete), 'alt-names')
 print(len(df_terminals_basic_to_delete), 'terminals')
 print(len(gdf_berths_to_delete), 'berths')
 
+list(gdf_PG_ports[gdf_PG_ports['port_id'].isin(gdf_ports_to_update['port_id'])]['zone_id'])
+
+df_terminals_basic_to_update
+
+gdf_berths_to_update
+
 # +
 # check berths to be deleted of related port of anch of port...
-df_temp = gdf_berths_to_delete[['berth_id', 'port_id']].merge(gdf_PG_ports[['zone_id', 'port_id', 'related_zone_anch_id', 'related_zone_port_id']], on='port_id').merge(gdf_PG_ports[['zone_id', 'related_zone_anch_id', 'related_zone_port_id']], on = 'related_zone_anch_id')
+df_temp = gdf_berths_to_update[['berth_id', 'port_id']].merge(gdf_PG_ports[['zone_id', 'port_id', 'related_zone_anch_id', 'related_zone_port_id']], on='port_id').merge(gdf_PG_ports[['zone_id', 'related_zone_anch_id', 'related_zone_port_id']], on = 'related_zone_anch_id')
 
 df_temp['zone_id_y'].value_counts()
-df_temp
+
 
 # +
 # check anch relations differences
@@ -1149,8 +1188,11 @@ print('Output characters:', len(final_sql))
 #Export
 save_sql(final_sql, instance, lines_per_part=1000)
 
-# +
-#pg_engine.dispose()
-# -
+pg_engine.dispose()
+# close cursors and connections
+sql_cursor.close()
+sql_conn.close()
+pg_engine.dispose()
+
 
 
