@@ -985,6 +985,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
         df_log_to_upload = df_log_combined
         if write_no_diff == False:
             df_log_to_upload = df_log_combined[df_log_combined['statement']!='no diff']
+        pg_engine = create_engine(pg_url)
         df_log_to_upload.to_sql(
             name="mt_transfer_log",    # table name
             con=pg_engine,             # sqlalchemy engine
@@ -992,6 +993,7 @@ def log_dataset(write=True, write_no_diff=True, comments=None):
             if_exists="append",        # append to existing table
             index=False                # don't write the index as a column
         )
+        pg_engine.dispose()
     return df_log_combined
 
 
@@ -1024,14 +1026,14 @@ diff_ids = check_sandbox_mt_same() #bookmark
 
 diff_ids[1]
 
+# +
 # one-liner save
-pd.Series(port_zone_id_list).to_csv("temp.csv", index=False)
+# pd.Series(port_zone_id_list).to_csv("temp.csv", index=False)
+# -
 
 # one-liner load
 port_zone_id_list = list(pd.read_csv("all_only_inserts.csv")['0'])
 len(port_zone_id_list)
-
-print(port_zone_id_list)
 
 # +
 # target ports existing
@@ -1076,7 +1078,7 @@ print('')
 #Quality errors
 df_errors = read_errors()
 #Name check
-df_name_check = name_check()
+df_name_check = name_check() #bookmark
 
 
 # Names trimmed
@@ -1183,16 +1185,14 @@ print('Output characters:', len(final_sql))
 
 # +
 #print(final_sql)
+
+# +
+#Export
+#save_sql(final_sql, instance, lines_per_part=1000)
 # -
 
-#Export
-save_sql(final_sql, instance, lines_per_part=1000)
 
-pg_engine.dispose()
-# close cursors and connections
-sql_cursor.close()
-sql_conn.close()
-pg_engine.dispose()
+
 
 
 
